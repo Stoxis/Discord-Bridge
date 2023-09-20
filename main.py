@@ -11,7 +11,9 @@ import re
 
 # Todo display message reacts under message (Draglox suggestion)
 # Todo add nicknames
+# Todo add custom profile picture command
 # Todo add slash command functionality
+# Profile command that displays real & fake user information
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -112,6 +114,7 @@ async def pair(ctx, channel1str, channel2str):
     if (
         not ctx.guild.me.guild_permissions.manage_webhooks
         or not channel1.guild.me.guild_permissions.manage_webhooks
+        or not channel2.guild.me.guild_permissions.manage_webhooks
     ):
         await ctx.send(':negative_squared_cross_mark: I require permissions to create a webhook in both guilds!')
         return
@@ -143,6 +146,7 @@ async def pair(ctx, channel1str, channel2str):
 @has_create_webhook_permission()
 async def unpair(ctx, channel1str, channel2str):
     global channel_pairs
+    # Fix bug: Only remove this pair, if channel1 or 2 are linked to other non-specified channels, preserve those connections (current code unpairs those as well)
     channel1 = await get_channel_from_input(channel1str)
     channel2 = await get_channel_from_input(channel2str)
     # Check if the channels exist
@@ -158,13 +162,16 @@ async def unpair(ctx, channel1str, channel2str):
         await ctx.send(f':negative_squared_cross_mark: I\'m unable to access the channel(s) listed: {fetched_channels}')
         return
     # Check if the pairing exists
+    fetched_channels = None
     if(str(channel1.id) not in channel_pairs):
-        await ctx.send('f:negative_squared_cross_mark: {channel1.mention} is not a paired channel.')
-        if(str(channel2.id) not in channel_pairs):
-            await ctx.send('f:negative_squared_cross_mark: {channel2.mention} is not a paired channel.')
-        return
+        fetched_channels = channel1.mention
     if(str(channel2.id) not in channel_pairs):
-        await ctx.send('f:negative_squared_cross_mark: {channel2.mention} is not a paired channel.')
+        if fetched_channels is not None:
+            fetched_channels += ", " + channel2.mention
+        else:
+            fetched_channels = channel2.mention
+    if (str(channel1.id) not in channel_pairs) or (str(channel2.id) not in channel_pairs):
+        await ctx.send(f':negative_squared_cross_mark: The channel(s) listed aren\'t paired: {fetched_channels}')
         return
 
     # Delete the webhooks
@@ -188,7 +195,7 @@ async def list(ctx):
     for ch1, (webhook_url, ch2) in channel_pairs.items():
         # Check if the channel ID has already been processed
         ch1 = int(ch1)
-        if ch1 in processed_channels or ch2 in processed_channels:
+        if ch1 in processed_channels and ch2 in processed_channels:
             continue
 
         pair_list.append(f'<#{ch1}> :left_right_arrow: <#{ch2}>')
@@ -199,12 +206,10 @@ async def list(ctx):
     embed = discord.Embed(
         title="Channel Pairs",
         description="\n".join(pair_list),
-        color=discord.Color.blue()  # You can customize the color
+        color=discord.Color.blue()
     )
     
     await ctx.send(embed=embed)
-
-import discord
 
 # Help command
 @bot.command()
@@ -214,7 +219,7 @@ async def help(ctx):
     embed = discord.Embed(
         title="Available Commands",
         description="Here are the available commands:",
-        color=discord.Color.blue()  # You can customize the color
+        color=discord.Color.blue()
     )
 
     embed.add_field(
@@ -397,9 +402,19 @@ async def on_raw_reaction_add(payload):
             if target_channel:
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.get_message(payload.message_id)
-					
-                    if msg.content == reactMsg.content:
+                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
+                    if (reactMsg.author.global_name == None):
+                        reactedUsername = reactMsg.author.name
+                    else:
+                        reactedUsername = reactMsg.author.global_name
+                    if (msg.author.global_name == None):
+                        targetUsername = msg.author.name
+                    else:
+                        targetUsername = msg.author.global_name
+                    if (
+                        msg.content == reactMsg.content
+                        and targetUsername == reactedUsername
+                    ):
                         real_message = msg
                         break
                 else:
@@ -440,9 +455,19 @@ async def on_raw_reaction_remove(payload):
             if target_channel:
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.get_message(payload.message_id)
-                    
-                    if msg.content == reactMsg.content:
+                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
+                    if (reactMsg.author.global_name == None):
+                        reactedUsername = reactMsg.author.name
+                    else:
+                        reactedUsername = reactMsg.author.global_name
+                    if (msg.author.global_name == None):
+                        targetUsername = msg.author.name
+                    else:
+                        targetUsername = msg.author.global_name
+                    if (
+                        msg.content == reactMsg.content
+                        and targetUsername == reactedUsername
+                    ):
                         real_message = msg
                         break
                 else:
