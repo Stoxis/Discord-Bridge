@@ -1,4 +1,5 @@
 Introducing the **Discord Bridge Bot** – Your Ultimate Channel Pairing Companion
+
 **Discord Bridge Bot**
 
 The Discord Bridge Bot is a versatile and user-friendly Python bot that streamlines the process of mirroring messages and reactions between two Discord text channels. Whether you're looking to keep multiple channels synchronized for important announcements, collaboration, or any other purpose, this bot simplifies the task, enhancing your server's communication and organization.
