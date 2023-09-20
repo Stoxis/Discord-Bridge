@@ -23,6 +23,24 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
+# Create a custom check to verify "create webhook" permission
+def has_create_webhook_permission():
+    async def predicate(ctx):
+        if ctx.guild:
+            # Check if the user has the "create webhook" permission in the current guild
+            permissions = ctx.author.guild_permissions
+            if permissions.manage_webhooks:
+                return True
+            else:
+                await ctx.send("You don't have permission to manage webhooks.")
+                return False
+        else:
+            # This command only applies to guilds (servers)
+            await ctx.send("This command can only be used in a server (guild).")
+            return False
+
+    return commands.check(predicate)
+
 async def get_channel_from_input(input_str):
     # Regular expression pattern to match channel mentions and IDs
     channel_pattern = re.compile(r'<#(\d+)>|(\d+)')
@@ -73,6 +91,7 @@ async def on_ready():
 
 # Command to pair two channels
 @bot.command()
+@has_create_webhook_permission()
 async def pair(ctx, channel1str, channel2str):
     global channel_pairs
     channel1 = await get_channel_from_input(channel1str)
@@ -121,10 +140,23 @@ async def pair(ctx, channel1str, channel2str):
 
 # Command to unpair two channels
 @bot.command()
-async def unpair(ctx, channel1, channel2):
+@has_create_webhook_permission()
+async def unpair(ctx, channel1str, channel2str):
     global channel_pairs
-    channel1 = await get_channel_from_input(channel1)
-    channel2 = await get_channel_from_input(channel2)
+    channel1 = await get_channel_from_input(channel1str)
+    channel2 = await get_channel_from_input(channel2str)
+    # Check if the channels exist
+    fetched_channels = None
+    if channel1 == None:
+        fetched_channels = channel1str
+    if channel2 == None:
+        if fetched_channels is not None:
+            fetched_channels += ", " + channel2str
+        else:
+            fetched_channels = channel2str
+    if channel1 == None or channel2 == None:
+        await ctx.send(f':negative_squared_cross_mark: I\'m unable to access the channel(s) listed: {fetched_channels}')
+        return
     # Check if the pairing exists
     if(str(channel1.id) not in channel_pairs):
         await ctx.send('f:negative_squared_cross_mark: {channel1.mention} is not a paired channel.')
@@ -148,6 +180,7 @@ async def unpair(ctx, channel1, channel2):
 
 # Command to list channel pairs
 @bot.command()
+@has_create_webhook_permission()
 async def list(ctx):
     processed_channels = set()  # Create a set to keep track of processed channel IDs
     pair_list = []
@@ -175,6 +208,7 @@ import discord
 
 # Help command
 @bot.command()
+@has_create_webhook_permission()
 async def help(ctx):
     # Create an embed for the help message
     embed = discord.Embed(
