@@ -48,13 +48,13 @@ def save_channel_pairs():
 async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     load_channel_pairs()
-    print(channel_pairs)
+    #print(channel_pairs)
 
 # Command to pair two channels
 @bot.command()
 async def pair(ctx, channel1, channel2):
     global channel_pairs
-    print(bot.activity)
+    #print(bot.activity)
 
     try:
         # Try to fetch both channels
@@ -126,7 +126,7 @@ async def list(ctx):
 async def help(ctx):
     help_message = '''
     **Available Commands:**
-    `^pair <channel1> <channel2>` - Pair two channels
+    `^pair <Channel ID 1> <Channel ID 2>` - Pair two channels
     `^unpair <channel1> <channel2>` - Unpair two channels
     `^list` - List paired channels
     `^help` - Show this message
@@ -163,13 +163,11 @@ async def on_message(message):
 # Event listener for raw message deletion events
 @bot.event
 async def on_raw_message_delete(payload):
+    if(payload.cached_message == None):
+        return
     # Get the channel ID and message ID from the payload
     channel_id1 = payload.channel_id
     message_id = payload.message_id
-
-    # Log the channel ID and message ID of the deleted message
-    print(f"Message deleted in channel {channel_id1}: {message_id}")
-
     # Find the paired channel for the current channel
     paired_channel_id = None
     for channel_id, (webhook_url, paired_id) in channel_pairs.items():
@@ -183,38 +181,97 @@ async def on_raw_message_delete(payload):
         target_channel = bot.get_channel(paired_channel_id)
 
         if target_channel:
-            print(f"Message deleted in paired channel: {message_id}")
-
             # Fetch the mirrored message from the target channel's webhook
             async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
                 if (payload.cached_message.author.global_name == None):
                     payloadUsername = payload.cached_message.author.name
                 else:
                     payloadUsername = payload.cached_message.author.global_name
-                #print(msg)
                 if (msg.author.global_name == None):
                     targetUsername = msg.author.name
                 else:
                     targetUsername = msg.author.global_name
-                #print(payload)
-                #print('author: ' + targetUsername + '\nContent: ' + msg.content)
-                #print('authorcompare: ' + payloadUsername + '\nContentcompare: ' + payload.cached_message.content)
                 if (
                     msg.content == payload.cached_message.content
                     and targetUsername == payloadUsername
                 ):
+				    # Log the channel ID and message ID of the deleted message
+                    print(f"Message({message_id}) deleted in paired channel({channel_id1}), propagating deletion to paired channel({paired_channel_id})")
                     await msg.delete()
-                    print(f"Mirrored message removed from target channel: {message_id}")
                     break
-            else:
-                print("No mirrored message found in target channel history")
         else:
             print("Target channel not found")
     else:
         print("Message not in a paired channel")
 
+# on_message_edit WILL ONLY REACT to messages sent AFTER the bot was started,
+# it's impossible to re-cache messages messages sent before the bot was started.
+
+# Event listener for message edits
+@bot.event
+async def on_message_edit(before, after):
+    # Ignore edits done by the bot itself
+    if before.author.bot:
+        return
+    
+    # Find the paired channel for the current channel
+    paired_channel_id = None
+    paired_webhook_url = [v[0] for v in channel_pairs.values() if v[1] == before.channel.id]
+    paired_webhook_url = paired_webhook_url[0]
+    
+    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+        if before.channel.id == int(channel_id):
+            paired_channel_id = paired_id		
+            break
+	
+    # Check if the channel ID is in the paired channels dictionary
+    if paired_channel_id is not None:
+        # Get the target channel
+        target_channel = bot.get_channel(paired_channel_id)
+		
+        if target_channel:
+            # Fetch the mirrored message from the target channel's webhook
+            async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
+                if (before.author.global_name == None):
+                    beforeUsername = before.author.name
+                else:
+                    beforeUsername = before.author.global_name
+
+                if (msg.author.global_name == None):
+                    targetUsername = msg.author.name
+                else:
+                    targetUsername = msg.author.global_name
+
+                if (
+                    msg.content == before.content
+                    and targetUsername == beforeUsername
+                ):
+                    # Edit the mirrored message in the target channel
+                    print(f"Editing message with ID: {msg.id}")
+                    try:
+                        # Get the webhook and edit the message
+                        webhook = discord.Webhook.from_url(paired_webhook_url, client=bot)
+                        await webhook.edit_message(
+                            msg.id,
+                            content=after.content,
+                            attachments=after.attachments,
+                            embeds=after.embeds,
+                        )
+                        print(f"Message edited successfully: {msg.id}")
+                    except discord.NotFound as e:
+                        print(f"Message not found in target channel: {msg.id}")
+                    except Exception as e:
+                        print(f"Error editing message: {e}")
+                    break
+        else:
+            print(f"Target channel not found: {paired_channel_id}")
+
 @bot.event
 async def on_raw_reaction_add(payload):
+    # Check if reaction wasn't added by self
+    if payload.member.id == bot.user.id:
+        return
+    
     print(f"Reaction added: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
 
     # Check if the reacted message is in a paired channel
@@ -230,12 +287,6 @@ async def on_raw_reaction_add(payload):
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
                     reactMsg = await reaction_channel.fetch_message(payload.message_id)
-					
-                    # Check if reaction wasn't added by self
-                    if payload.member.id != bot.user.id:
-                        if msg.content == reactMsg.content:
-                            real_message = msg
-                            break
 					
                     if msg.content == reactMsg.content:
                         real_message = msg
@@ -260,6 +311,10 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
+    # Check if reaction wasn't added by self
+    if payload.user_id == bot.user.id:
+	    return
+    
     print(f"Reaction removed: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
 
     # Check if the reacted message is in a paired channel
@@ -275,12 +330,10 @@ async def on_raw_reaction_remove(payload):
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
                     reactMsg = await reaction_channel.fetch_message(payload.message_id)
-
-                    # Check if reaction wasn't added by self
-                    if payload.user_id != bot.user.id:
-                        if msg.content == reactMsg.content:
-                            real_message = msg
-                            break
+                    
+                    if msg.content == reactMsg.content:
+                        real_message = msg
+                        break
                 else:
                     real_message = None
                 if real_message:
