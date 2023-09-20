@@ -3,6 +3,15 @@ import discord
 from discord.ext import commands
 import json
 import aiohttp
+import re
+
+# Todo queue for message edit-message delete
+# Todo queue for reaction add-reaction remove
+# ^^^ To prevent conflicts these functions must not run at the same time
+
+# Todo display message reacts under message (Draglox suggestion)
+# Todo add nicknames
+# Todo add slash command functionality
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -14,15 +23,27 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# Custom channel converter to handle errors
-class CustomTextChannel(commands.TextChannelConverter):
-    async def convert(self, ctx, argument):
-        try:
-            channel = await super().convert(ctx, argument)
-            await channel.guild.fetch_channel(channel.id)  # Try to fetch the channel
-            return channel
-        except (commands.ChannelNotFound, discord.NotFound):
-            raise commands.BadArgument(f'I\'m unable to access the channel {argument}.')
+async def get_channel_from_input(input_str):
+    # Regular expression pattern to match channel mentions and IDs
+    channel_pattern = re.compile(r'<#(\d+)>|(\d+)')
+
+    # Try to find a match in the input string
+    match = channel_pattern.match(input_str)
+
+    if match:
+        # Check if a channel mention (<#channel_id>) was found
+        if match.group(1):
+            channel_id = int(match.group(1))
+        else:
+            # Use the numeric ID if no mention was found
+            channel_id = int(match.group(2))
+        
+        # Get the channel object
+        channel = bot.get_channel(channel_id)
+
+        return channel
+    else:
+        return None
 
 # Dictionary to store channel pairs
 channel_pairs = {}
@@ -52,16 +73,20 @@ async def on_ready():
 
 # Command to pair two channels
 @bot.command()
-async def pair(ctx, channel1, channel2):
+async def pair(ctx, channel1str, channel2str):
     global channel_pairs
-    #print(bot.activity)
-
-    try:
-        # Try to fetch both channels
-        channel1 = await bot.fetch_channel(channel1)
-        channel2 = await bot.fetch_channel(channel2)
-    except:
-        await ctx.send(f':negative_squared_cross_mark: I\'m unable to access one or both of the specified channels.')
+    channel1 = await get_channel_from_input(channel1str)
+    channel2 = await get_channel_from_input(channel2str)
+    fetched_channels = None
+    if channel1 == None:
+        fetched_channels = channel1str
+    if channel2 == None:
+        if fetched_channels is not None:
+            fetched_channels += ", " + channel2str
+        else:
+            fetched_channels = channel2str
+    if channel1 == None or channel2 == None:
+        await ctx.send(f':negative_squared_cross_mark: I\'m unable to access the channel(s) listed: {fetched_channels}')
         return
 
     # Check if the bot has permission to create webhooks in both guilds
@@ -96,21 +121,27 @@ async def pair(ctx, channel1, channel2):
 
 # Command to unpair two channels
 @bot.command()
-async def unpair(ctx, channel1: discord.TextChannel, channel2: discord.TextChannel):
+async def unpair(ctx, channel1, channel2):
     global channel_pairs
-
-    # Check if the pair exists
-    if channel1.id not in channel_pairs or channel2.id not in channel_pairs:
-        await ctx.send(':negative_squared_cross_mark: This pair doesn\'t exist!')
+    channel1 = await get_channel_from_input(channel1)
+    channel2 = await get_channel_from_input(channel2)
+    # Check if the pairing exists
+    if(str(channel1.id) not in channel_pairs):
+        await ctx.send('f:negative_squared_cross_mark: {channel1.mention} is not a paired channel.')
+        if(str(channel2.id) not in channel_pairs):
+            await ctx.send('f:negative_squared_cross_mark: {channel2.mention} is not a paired channel.')
+        return
+    if(str(channel2.id) not in channel_pairs):
+        await ctx.send('f:negative_squared_cross_mark: {channel2.mention} is not a paired channel.')
         return
 
     # Delete the webhooks
-    await discord.Webhook.from_url(channel_pairs[channel1.id][0], session=bot.http._HTTPClient__session).delete()
-    await discord.Webhook.from_url(channel_pairs[channel2.id][0], session=bot.http._HTTPClient__session).delete()
+    await discord.Webhook.from_url(channel_pairs[str(channel1.id)][0], session=bot.http._HTTPClient__session).delete()
+    await discord.Webhook.from_url(channel_pairs[str(channel2.id)][0], session=bot.http._HTTPClient__session).delete()
 
     # Remove the pair from the dictionary
-    del channel_pairs[channel1.id]
-    del channel_pairs[channel2.id]
+    del channel_pairs[str(channel1.id)]
+    del channel_pairs[str(channel2.id)]
     save_channel_pairs()
 
     await ctx.send(':white_check_mark: Webhook pair destroyed!')
@@ -118,20 +149,66 @@ async def unpair(ctx, channel1: discord.TextChannel, channel2: discord.TextChann
 # Command to list channel pairs
 @bot.command()
 async def list(ctx):
-    pair_list = "\n".join([f'<#{ch1}>:<#{ch2}>' for ch1, (_, ch2) in channel_pairs.items()])
-    await ctx.send(pair_list)
+    processed_channels = set()  # Create a set to keep track of processed channel IDs
+    pair_list = []
+
+    for ch1, (webhook_url, ch2) in channel_pairs.items():
+        # Check if the channel ID has already been processed
+        ch1 = int(ch1)
+        if ch1 in processed_channels or ch2 in processed_channels:
+            continue
+
+        pair_list.append(f'<#{ch1}> :left_right_arrow: <#{ch2}>')
+        processed_channels.add(ch1)
+        processed_channels.add(ch2)
+
+    # Create an embed to send the list
+    embed = discord.Embed(
+        title="Channel Pairs",
+        description="\n".join(pair_list),
+        color=discord.Color.blue()  # You can customize the color
+    )
+    
+    await ctx.send(embed=embed)
+
+import discord
 
 # Help command
 @bot.command()
 async def help(ctx):
-    help_message = '''
-    **Available Commands:**
-    `^pair <Channel ID 1> <Channel ID 2>` - Pair two channels
-    `^unpair <channel1> <channel2>` - Unpair two channels
-    `^list` - List paired channels
-    `^help` - Show this message
-    '''
-    await ctx.send(help_message)
+    # Create an embed for the help message
+    embed = discord.Embed(
+        title="Available Commands",
+        description="Here are the available commands:",
+        color=discord.Color.blue()  # You can customize the color
+    )
+
+    embed.add_field(
+        name="^pair <Channel> <Channel>",
+        value="Pair two channels",
+        inline=False
+    )
+
+    embed.add_field(
+        name="^unpair <Channel> <Channel>",
+        value="Unpair two channels",
+        inline=False
+    )
+
+    embed.add_field(
+        name="^list",
+        value="List paired channels",
+        inline=False
+    )
+
+    embed.add_field(
+        name="^help",
+        value="Show this message",
+        inline=False
+    )
+
+    await ctx.send(embed=embed)
+
 
 # Event to handle message copying
 @bot.event
@@ -286,7 +363,7 @@ async def on_raw_reaction_add(payload):
             if target_channel:
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
+                    reactMsg = await reaction_channel.get_message(payload.message_id)
 					
                     if msg.content == reactMsg.content:
                         real_message = msg
@@ -329,7 +406,7 @@ async def on_raw_reaction_remove(payload):
             if target_channel:
                 # Find the real message in the target channel
                 async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
+                    reactMsg = await reaction_channel.get_message(payload.message_id)
                     
                     if msg.content == reactMsg.content:
                         real_message = msg
