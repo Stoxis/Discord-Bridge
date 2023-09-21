@@ -337,20 +337,15 @@ async def on_raw_message_delete(payload):
     paired_channel_id = None
     for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
-            paired_channel_id = paired_id
-            break
-	
-    # Check if the channel ID is in the paired channels dictionary
-    if paired_channel_id is not None:
-        # Get the target channel
-        target_channel = bot.get_channel(paired_channel_id)
-        if target_channel:
-            try:
-                msg = await target_channel.fetch_message(target_message_id)
-                print(f"Message({message_id}) deleted, propagating deletion to paired message({target_message_id})")
-                await msg.delete()
-            except discord.NotFound:
-                print(f"Paired message({target_message_id}) not found")
+            # Get the target channel
+            target_channel = bot.get_channel(paired_id)
+            if target_channel:
+                try:
+                    msg = await target_channel.fetch_message(target_message_id)
+                    print(f"Message({message_id}) deleted, propagating deletion to paired message({target_message_id})")
+                    await msg.delete()
+                except discord.NotFound:
+                    print(f"Paired message({target_message_id}) not found")
             
 
 
