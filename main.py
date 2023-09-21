@@ -13,7 +13,8 @@ import re
 # Todo add nicknames
 # Todo add custom profile picture command
 # Todo add slash command functionality
-# Profile command that displays real & fake user information
+# Todo Profile command that displays real & fake user information
+# Todo Add multi-bridge support so three channels can be bridged in a row (how to do without database?)
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -24,6 +25,47 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+class bidict(dict):
+    def __init__(self, *args, **kwargs):
+        super(bidict, self).__init__(*args, **kwargs)
+        self.inverse = {}
+        for key, value in self.items():
+            self.inverse.setdefault(value, []).append(key) 
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.inverse[self[key]].remove(key) 
+        super(bidict, self).__setitem__(key, value)
+        self.inverse.setdefault(value, []).append(key)        
+
+    def __delitem__(self, key):
+        value = self[key] 
+        self.inverse.setdefault(value, []).remove(key)
+        if value in self.inverse and not self.inverse[value]: 
+            del self.inverse[value]
+        super(bidict, self).__delitem__(key)
+# bd = bidict({'a': 1, 'b': 2})
+# bd['a'] = 1
+# bd.inverse[1] = ['a'] 
+
+# Bi-Directional Dictionary to store message pairs
+message_pairs = bidict()
+
+# Load channel pairs from a file on bot startup
+def load_message_pairs():
+    global message_pairs
+    try:
+        with open('message_pairs.json', 'r') as file:
+            message_pairs = bidict(json.load(file))
+    except FileNotFoundError:
+        message_pairs = bidict()
+
+# Save channel pairs to a file
+def save_message_pairs():
+    global message_pairs
+    with open('message_pairs.json', 'w') as file:
+        json.dump(message_pairs, file, indent=4)
 
 # Create a custom check to verify "create webhook" permission
 def has_create_webhook_permission():
@@ -79,6 +121,7 @@ def load_channel_pairs():
 
 # Save channel pairs to a file
 def save_channel_pairs():
+    global channel_pairs
     with open('channel_pairs.json', 'w') as file:
         json.dump(channel_pairs, file, indent=4)
 	# If you don't load_channel_pairs() after saving the new pair the new pair isn't recognized until the bot is restarted and the new pair is loaded.
@@ -89,7 +132,7 @@ def save_channel_pairs():
 async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     load_channel_pairs()
-    #print(channel_pairs)
+    load_message_pairs()
 
 # Command to pair two channels
 @bot.command()
@@ -254,6 +297,7 @@ async def help(ctx):
 async def on_message(message):
     if message.author.bot:
         return
+    global message_pairs
 
     # Find the paired channel for the current channel
     paired_channel_id = None
@@ -265,25 +309,30 @@ async def on_message(message):
     if paired_channel_id:
         webhook_url, _ = channel_pairs[str(paired_channel_id)]
         async with aiohttp.ClientSession() as session:
-            async with session.post(webhook_url, json={
-                "content": message.content,
-                "username": message.author.display_name,
-                "avatar_url": message.author.display_avatar.url,
-                # You can add other parameters like embeds if needed
-            }) as response:
-                if response.status != 204:
-                    print(f"Failed to send message: {response.status}")
+            webhook = discord.Webhook.from_url(webhook_url, session=session)
+            response = await webhook.send(username=message.author.display_name,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
+            message_pairs[int(message.id)] = response.id
+            save_message_pairs()
 
     await bot.process_commands(message)
 
 # Event listener for raw message deletion events
 @bot.event
 async def on_raw_message_delete(payload):
-    if(payload.cached_message == None):
+    if(payload.cached_message is None):
         return
-    # Get the channel ID and message ID from the payload
-    channel_id1 = payload.channel_id
+    # Check if the message ID is in the message_pairs dictionary
     message_id = payload.message_id
+    if message_id in message_pairs:
+        target_message_id = message_pairs[message_id] #message_id is real msg
+        del message_pairs[message_id]
+    elif message_id in message_pairs.inverse:
+        target_message_id = message_pairs.inverse[message_id][0] #message_id is bot msg
+        del message_pairs[target_message_id]
+    else:
+        return
+    save_message_pairs()
+    
     # Find the paired channel for the current channel
     paired_channel_id = None
     for channel_id, (webhook_url, paired_id) in channel_pairs.items():
@@ -295,30 +344,15 @@ async def on_raw_message_delete(payload):
     if paired_channel_id is not None:
         # Get the target channel
         target_channel = bot.get_channel(paired_channel_id)
-
         if target_channel:
-            # Fetch the mirrored message from the target channel's webhook
-            async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                if (payload.cached_message.author.global_name == None):
-                    payloadUsername = payload.cached_message.author.name
-                else:
-                    payloadUsername = payload.cached_message.author.global_name
-                if (msg.author.global_name == None):
-                    targetUsername = msg.author.name
-                else:
-                    targetUsername = msg.author.global_name
-                if (
-                    msg.content == payload.cached_message.content
-                    and targetUsername == payloadUsername
-                ):
-				    # Log the channel ID and message ID of the deleted message
-                    print(f"Message({message_id}) deleted in paired channel({channel_id1}), propagating deletion to paired channel({paired_channel_id})")
-                    await msg.delete()
-                    break
-        else:
-            print("Target channel not found")
-    else:
-        print("Message not in a paired channel")
+            try:
+                msg = await target_channel.fetch_message(target_message_id)
+                print(f"Message({message_id}) deleted, propagating deletion to paired message({target_message_id})")
+                await msg.delete()
+            except discord.NotFound:
+                print(f"Paired message({target_message_id}) not found")
+            
+
 
 # on_message_edit WILL ONLY REACT to messages sent AFTER the bot was started,
 # it's impossible to re-cache messages messages sent before the bot was started.
