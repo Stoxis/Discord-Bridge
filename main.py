@@ -8,9 +8,9 @@ import re
 # Todo queue for message edit-message delete
 # Todo queue for reaction add-reaction remove
 # ^^^ To prevent conflicts these functions must not run at the same time
+# ^^^ They currently do
 
 # Todo display message reacts under message (Draglox suggestion)
-# Todo add nicknames
 # Todo add custom profile picture command
 # Todo add slash command functionality
 # Todo Profile command that displays real & fake user information
@@ -107,6 +107,38 @@ async def get_channel_from_input(input_str):
     else:
         return None
 
+async def get_user_from_input(input_str):
+    # Regular expression pattern to match user mentions and IDs
+    user_pattern = re.compile(r'<@!?(\d+)>|(\d+)')
+
+    # Try to find a match in the input string
+    match = user_pattern.match(input_str)
+
+    if match:
+        # Check if a user mention (<@user_id> or <@!user_id>) was found
+        if match.group(1):
+            user_id = int(match.group(1))
+        else:
+            # Use the numeric ID if no mention was found
+            user_id = int(match.group(2))
+        
+        try:
+            # Get the user object
+            user = await bot.fetch_user(user_id)
+        except:
+            return None
+        if user:
+            # Log successful user retrieval
+            print(f"User found: {user.name} (ID: {user.id})")
+            return user
+        else:
+            # Log user not found
+            print(f"User not found with ID: {user_id}")
+            return None
+    else:
+        return None
+
+
 # Dictionary to store channel pairs
 channel_pairs = {}
 
@@ -127,12 +159,30 @@ def save_channel_pairs():
 	# If you don't load_channel_pairs() after saving the new pair the new pair isn't recognized until the bot is restarted and the new pair is loaded.
     load_channel_pairs()
 
+# Dictionary to store nicknames
+nicknames = {}
+
+# Load nicknames from a file on bot startup
+def load_nicknames():
+    global nicknames
+    try:
+        with open('nicknames.json', 'r') as file:
+            nicknames = json.load(file)
+    except FileNotFoundError:
+        nicknames = {}
+
+# Save nicknames to a file
+def save_nicknames():
+    with open('nicknames.json', 'w') as file:
+        json.dump(nicknames, file, indent=4)
+
 # Event listener for bot ready event
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     load_channel_pairs()
     load_message_pairs()
+    load_nicknames()
 
 # Command to pair two channels
 @bot.command()
@@ -254,6 +304,37 @@ async def list(ctx):
     
     await ctx.send(embed=embed)
 
+# Command to set or display a nickname
+@bot.command()
+async def nickname(ctx, *, args=None):
+    global nicknames
+    if args:
+        # User provided arguments, attempt to set a nickname
+        user = await get_user_from_input(args)
+        if user is None:
+            if str(ctx.author.id) in nicknames: # If nickname already exists
+                del nicknames[str(ctx.author.id)] # Delete old nickname
+            # User is setting their own nickname
+            nicknames[str(ctx.author.id)] = args
+            save_nicknames()
+            await ctx.send(embed=discord.Embed(description=f"Your nickname has been set to: {args}"))
+            return
+        user_id = str(user.id)
+
+        if user_id in nicknames:
+            # Displaying another user's nickname
+            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {nicknames[user_id]}"))
+        else:
+            # User not found in nicknames dictionary
+            await ctx.send(embed=discord.Embed(description="No nickname is set for this user."))
+    else:
+        # No arguments provided, display the sender's own nickname
+        user_id = str(ctx.author.id)
+        if user_id in nicknames:
+            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {nicknames[user_id]}"))
+        else:
+            await ctx.send(embed=discord.Embed(description="No nickname is set for you."))
+
 # Help command
 @bot.command()
 @has_create_webhook_permission()
@@ -289,6 +370,12 @@ async def help(ctx):
         inline=False
     )
 
+    embed.add_field(
+        name="^nickname <user_mention|user_id|nickname_here|nothing>",
+        value="Set or display a nickname for yourself or another user",
+        inline=False
+    )
+
     await ctx.send(embed=embed)
 
 
@@ -307,10 +394,15 @@ async def on_message(message):
             break
 
     if paired_channel_id:
+        global nicknames
+        if str(message.author.id) in nicknames: # Nickname exists
+            username = nicknames[str(message.author.id)] # Use nickname
+        else: # Nickanme doesn't exist
+            username = message.author.display_name # Use display_name
         webhook_url, _ = channel_pairs[str(paired_channel_id)]
         async with aiohttp.ClientSession() as session:
             webhook = discord.Webhook.from_url(webhook_url, session=session)
-            response = await webhook.send(username=message.author.display_name,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
+            response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
             message_pairs[str(message.id)] = response.id
             save_message_pairs()
 
