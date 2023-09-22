@@ -311,7 +311,7 @@ async def on_message(message):
         async with aiohttp.ClientSession() as session:
             webhook = discord.Webhook.from_url(webhook_url, session=session)
             response = await webhook.send(username=message.author.display_name,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
-            message_pairs[int(message.id)] = response.id
+            message_pairs[str(message.id)] = response.id
             save_message_pairs()
 
     await bot.process_commands(message)
@@ -319,13 +319,12 @@ async def on_message(message):
 # Event listener for raw message deletion events
 @bot.event
 async def on_raw_message_delete(payload):
-    if(payload.cached_message is None):
-        return
+    global message_pairs
     # Check if the message ID is in the message_pairs dictionary
     message_id = payload.message_id
-    if message_id in message_pairs:
-        target_message_id = message_pairs[message_id] #message_id is real msg
-        del message_pairs[message_id]
+    if str(message_id) in message_pairs:
+        target_message_id = message_pairs[str(message_id)] #message_id is real msg
+        del message_pairs[str(message_id)]
     elif message_id in message_pairs.inverse:
         target_message_id = message_pairs.inverse[message_id][0] #message_id is bot msg
         del message_pairs[target_message_id]
@@ -341,191 +340,159 @@ async def on_raw_message_delete(payload):
             target_channel = bot.get_channel(paired_id)
             if target_channel:
                 try:
-                    msg = await target_channel.fetch_message(target_message_id)
+                    target_message = await target_channel.fetch_message(target_message_id)
                     print(f"Message({message_id}) deleted, propagating deletion to paired message({target_message_id})")
-                    await msg.delete()
+                    await target_message.delete()
                 except discord.NotFound:
                     print(f"Paired message({target_message_id}) not found")
-            
-
-
-# on_message_edit WILL ONLY REACT to messages sent AFTER the bot was started,
-# it's impossible to re-cache messages messages sent before the bot was started.
 
 # Event listener for message edits
 @bot.event
-async def on_message_edit(before, after):
-    # Ignore edits done by the bot itself
-    if before.author.bot:
+async def on_raw_message_edit(payload):
+    # Check if the message ID is in the message_pairs dictionary
+    message_id = payload.message_id
+    if str(message_id) in message_pairs:
+        target_message_id = message_pairs[str(message_id)] #message_id is real msg
+    elif message_id in message_pairs.inverse:
         return
-    
+        #target_message_id = message_pairs.inverse[message_id][0] #message_id is bot msg (technically impossible because you can't edit the bot message)
+    else:
+        return
     # Find the paired channel for the current channel
     paired_channel_id = None
-    paired_webhook_url = [v[0] for v in channel_pairs.values() if v[1] == before.channel.id]
+    paired_webhook_url = [v[0] for v in channel_pairs.values() if v[1] == payload.channel_id]
     paired_webhook_url = paired_webhook_url[0]
-    
-    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
-        if before.channel.id == int(channel_id):
-            paired_channel_id = paired_id		
-            break
-	
+
     # Check if the channel ID is in the paired channels dictionary
-    if paired_channel_id is not None:
-        # Get the target channel
-        target_channel = bot.get_channel(paired_channel_id)
-		
-        if target_channel:
-            # Fetch the mirrored message from the target channel's webhook
-            async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                if (before.author.global_name == None):
-                    beforeUsername = before.author.name
-                else:
-                    beforeUsername = before.author.global_name
-
-                if (msg.author.global_name == None):
-                    targetUsername = msg.author.name
-                else:
-                    targetUsername = msg.author.global_name
-
-                if (
-                    msg.content == before.content
-                    and targetUsername == beforeUsername
-                ):
+    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+        if payload.channel_id == int(channel_id):
+            paired_channel_id = paired_id
+            if paired_id is not None:
+                # Get the target channel
+                target_channel = bot.get_channel(paired_channel_id)
+            
+                if target_channel:
                     # Edit the mirrored message in the target channel
-                    print(f"Editing message with ID: {msg.id}")
+                    print(f"Message edited with ID: {message_id}")
                     try:
                         # Get the webhook and edit the message
                         webhook = discord.Webhook.from_url(paired_webhook_url, client=bot)
                         await webhook.edit_message(
-                            msg.id,
-                            content=after.content,
-                            attachments=after.attachments,
-                            embeds=after.embeds,
+                            target_message_id,
+                            content=payload.data['content'],
+                            attachments=payload.data['attachments'],
+                            embeds=payload.data['embeds'],
                         )
-                        print(f"Message edited successfully: {msg.id}")
+                        print(f"Mirrored message edited successfully: {target_message_id}")
                     except discord.NotFound as e:
-                        print(f"Message not found in target channel: {msg.id}")
+                        print(f"Mirrored message not found in target channel: {target_message_id}")
                     except Exception as e:
                         print(f"Error editing message: {e}")
-                    break
-        else:
-            print(f"Target channel not found: {paired_channel_id}")
-
+                        
+# Event listener for added reactions
 @bot.event
 async def on_raw_reaction_add(payload):
     # Check if reaction wasn't added by self
     if payload.member.id == bot.user.id:
         return
-    
+    global message_pairs
     print(f"Reaction added: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
+    #print(message_pairs)
 
-    # Check if the reacted message is in a paired channel
+    # Check if the reacted message ID is in the message_pairs dictionary
+    reacted_message_id = payload.message_id
+    if str(reacted_message_id) in message_pairs:
+        target_message_id = message_pairs[str(reacted_message_id)] #reacted_message_id is real msg
+    elif reacted_message_id in message_pairs.inverse:
+        target_message_id = message_pairs.inverse[int(reacted_message_id)][0] #reacted_message_id is bot msg
+    else:
+        return
+    
+    print(f"Reaction added: {payload.emoji} by user {payload.user_id} to message {reacted_message_id} in channel {payload.channel_id}")
+
+    # Check if the target message is in a paired channel
     for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
             # Get the target channel
             target_channel = bot.get_channel(target_channel_id)
-			
-            # Get reaction channel
-            reaction_channel = bot.get_channel(payload.channel_id)
 
             if target_channel:
-                # Find the real message in the target channel
-                async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
-                    if (reactMsg.author.global_name == None):
-                        reactedUsername = reactMsg.author.name
-                    else:
-                        reactedUsername = reactMsg.author.global_name
-                    if (msg.author.global_name == None):
-                        targetUsername = msg.author.name
-                    else:
-                        targetUsername = msg.author.global_name
-                    if (
-                        msg.content == reactMsg.content
-                        and targetUsername == reactedUsername
-                    ):
-                        real_message = msg
-                        break
-                else:
-                    real_message = None
+                try:
+                    # Find the paired message in the target channel by ID
+                    target_message = await target_channel.fetch_message(target_message_id)
 
-                if real_message:
-                    print(f"Real message found with ID {real_message.id}")
-
-                    # Loop through reactions on the real message
-                    for reaction in real_message.reactions:
-                        if str(reaction.emoji) == str(payload.emoji):
-                            print(f"Emoji {payload.emoji} is already among the reactions.")
-                            break
+                    if target_message:
+                        # Loop through reactions on the paired message
+                        for reaction in target_message.reactions:
+                            if str(reaction.emoji) == str(payload.emoji):
+                                print(f"Emoji {payload.emoji} is already among the reactions.")
+                                break
+                        else:
+                            # Add the reaction to the real message
+                            await target_message.add_reaction(payload.emoji.name)
+                            print(f"Reaction: {payload.emoji} mirrored to paired message: {target_message_id}")
                     else:
-                        # Add the reaction to the real message
-                        await real_message.add_reaction(payload.emoji.name)
-                        print(f"Reaction mirrored to real message: {payload.emoji}")
-                else:
-                    print("Real message not found")
+                        print("Paired message not found")
+                except discord.NotFound:
+                    print(f"Paired message with ID {target_message_id} not found in target channel")
+                except Exception as e:
+                    print(f"Error handling reaction: {e}")
 
+# Event listener for removed reactions
 @bot.event
 async def on_raw_reaction_remove(payload):
     # Check if reaction wasn't added by self
     if payload.user_id == bot.user.id:
-	    return
-    
+        return
+
     print(f"Reaction removed: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
 
-    # Check if the reacted message is in a paired channel
+    # Check if the reacted message ID is in the message_pairs dictionary
+    reacted_message_id = payload.message_id
+    if str(reacted_message_id) in message_pairs:
+        target_message_id = message_pairs[str(reacted_message_id)]  # reacted_message_id is real msg
+    elif reacted_message_id in message_pairs.inverse:
+        target_message_id = message_pairs.inverse[int(reacted_message_id)][0]  # reacted_message_id is bot msg
+    else:
+        return
+        
+    # Get reaction channel
+    reaction_channel = bot.get_channel(payload.channel_id)
+        
+    users_reacted = [] 
+    reactMsg = await reaction_channel.fetch_message(payload.message_id)
+    # Loop through reactions on payload.message_id
+    for reaction in reactMsg.reactions:
+        if str(reaction.emoji) == str(payload.emoji):
+            # Check if there are other users (besides the bot) who have reacted to original Msg (this prevents removing the reaction when it's still being used under a message)
+            async for user in reaction.users():
+                if user.id != bot.user.id:
+                    users_reacted.append(user)
+    
+    # Check if the target message is in a paired channel
     for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
             # Get the target channel
             target_channel = bot.get_channel(target_channel_id)
-            
-            # Get reaction channel
-            reaction_channel = bot.get_channel(payload.channel_id)
 
             if target_channel:
-                # Find the real message in the target channel
-                async for msg in target_channel.history(limit=100):  # Adjust the limit as needed
-                    reactMsg = await reaction_channel.fetch_message(payload.message_id)
-                    if (reactMsg.author.global_name == None):
-                        reactedUsername = reactMsg.author.name
-                    else:
-                        reactedUsername = reactMsg.author.global_name
-                    if (msg.author.global_name == None):
-                        targetUsername = msg.author.name
-                    else:
-                        targetUsername = msg.author.global_name
-                    if (
-                        msg.content == reactMsg.content
-                        and targetUsername == reactedUsername
-                    ):
-                        real_message = msg
-                        break
-                else:
-                    real_message = None
-                if real_message:
-                    
-                    users_reacted = ""
-                    # Loop through reactions on reactMsg
-                    for reaction in reactMsg.reactions:
-                        if str(reaction.emoji) == str(payload.emoji):
-                            # Check if there are other users (besides the bot) who have reacted to reactMsg
-                            users_reacted = []
-                            async for user in reaction.users():
-                                users_reacted.append(user)
+                try:
+                    # Find the paired message in the target channel by ID
+                    target_message = await target_channel.fetch_message(target_message_id)
 
-                    #print(users_reacted)
-                    #print(len(users_reacted))
-                    if len(users_reacted) > 0:  # There are other non-bot users who reacted
-                        print(f"Reaction not removed from reactMsg: {payload.emoji} (Other users reacted)")
+                    if target_message:
+                        if len(users_reacted) == 0:
+                            # Remove the reaction from the real message
+                            await target_message.remove_reaction(payload.emoji, bot.user)
+                            print(f"Reaction removed from paired message: {payload.emoji}")
+                        else:
+                            print(f"Reaction not removed from paired message: {payload.emoji} (Other users reacted)")
                     else:
-                        # Loop through reactions on the real message
-                        for reaction in real_message.reactions:
-                            if str(reaction.emoji) == str(payload.emoji):
-                                # Remove the reaction from the real message
-                                await real_message.remove_reaction(payload.emoji, bot.user)
-                                print(f"Reaction removed from real message: {payload.emoji}")
-                                break
-                else:
-                    print("Real message not found")
+                        print("Paired message not found")
+                except discord.NotFound:
+                    print(f"Paired message with ID {target_message_id} not found in target channel")
+                except Exception as e:
+                    print(f"Error handling reaction removal: {e}")
 
 # Run the bot
 if __name__ == '__main__':
