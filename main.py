@@ -4,13 +4,13 @@ from discord.ext import commands
 import json
 import aiohttp
 import re
+import os
 
 # Todo queue for message edit-message delete
 # Todo queue for reaction add-reaction remove
 # ^^^ To prevent conflicts these functions must not run at the same time
 # ^^^ They currently do
 
-# Todo display message reacts under message (Draglox suggestion)
 # Todo add custom profile picture command
 # Todo add slash command functionality
 # Todo Profile command that displays real & fake user information
@@ -55,8 +55,8 @@ message_reactions = {}
 # Dictionary to store channel pairs
 channel_pairs = {}
 
-# Dictionary to store nicknames
-nicknames = {}
+# Dictionary to store members
+members = {}
 
 def load_data(filename, global_var, default=None):
     try:
@@ -154,7 +154,21 @@ async def on_ready():
     load_data('channel_pairs.json', 'channel_pairs', {})
     load_data('message_pairs.json', 'message_pairs', bidict())
     load_data('message_reactions.json', 'message_reactions', {})
-    load_data('nicknames.json', 'nicknames', {})
+    load_data('members.json', 'members', {})
+    cogs = []
+    for cog_file in os.listdir('cogs/'):
+        if cog_file.endswith('.py') and cog_file != 'slash.py':
+            cog_import = 'cogs.' + cog_file.split('.')[0]
+            cogs.append(cog_import)
+            print(f'Found {cog_file} as cog')
+    
+    for cog in cogs:
+        print(f'Loading {cog}')
+        try:
+            await bot.load_extension(cog)
+        except discord.ext.commands.errors.ExtensionAlreadyLoaded:
+            # Bot tried to load a cog that was already loaded.
+            print(f"Tried to load a cog/extension that was already loaded ({cog})")
 
 # Command to pair two channels
 @bot.command()
@@ -279,34 +293,81 @@ async def list(ctx):
 # Command to set or display a nickname
 @bot.command() # Todo remove nickname command
 async def nickname(ctx, *, args=None):
-    global nicknames
+    global members
     if args:
         # User provided arguments, attempt to set a nickname
         user = await get_user_from_input(args)
         if user is None:
-            if str(ctx.author.id) in nicknames: # If nickname already exists
-                del nicknames[str(ctx.author.id)] # Delete old nickname
+            if str(ctx.author.id) in members and "nickname" in data[str(ctx.author.id)]: # If nickname already exists
+                del members[str(ctx.author.id)]["nickname"] # Delete old nickname
+            elif str(ctx.author.id) not in members:
+                members[str(ctx.author.id)] = {}
             # User is setting their own nickname
-            nicknames[str(ctx.author.id)] = args
-            save_data('nicknames.json', nicknames)
+            members[str(ctx.author.id)]["nickname"] = args
+            save_data('members.json', members)
             await ctx.send(embed=discord.Embed(description=f"Your nickname has been set to: {args}"))
             return
         user_id = str(user.id)
 
-        if user_id in nicknames:
+        if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
             # Displaying another user's nickname
-            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {nicknames[user_id]}"))
+            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {members[user_id]}"))
         else:
             # User not found in nicknames dictionary
             await ctx.send(embed=discord.Embed(description="No nickname is set for this user."))
     else:
         # No arguments provided, display the sender's own nickname
         user_id = str(ctx.author.id)
-        if user_id in nicknames:
-            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {nicknames[user_id]}"))
+        if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
+            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {members[user_id]}"))
         else:
             await ctx.send(embed=discord.Embed(description="No nickname is set for you."))
 
+@bot.command()
+async def get_author(ctx, message_id=None):
+    if message_id is None:
+        await ctx.send("Please provide a message ID.")
+        return
+    try:
+        message_id = int(message_id)
+    except:
+        await ctx.send("Message IDs should only contain numbers, please provide a valid message ID.")
+        return
+    # Check if the provided message_id exists in the message_pairs dictionary
+    original_id = None  # Store the original message_id
+    isOriginal = False
+    for original, paired in message_pairs.items():
+        if str(paired) == str(message_id):
+            # Found a matching pair, use the original message_id
+            original_id = original
+            break
+        elif str(original) == str(message_id):
+            # original_id = original
+            isOriginal = True
+            break
+    if isOriginal:
+        await ctx.send("You provided the message ID of the original author.")
+        return
+    if original_id is not None:
+        # Iterate through guilds and text channels to find the message
+        for guild in bot.guilds:
+            for channel in guild.text_channels:
+                try:
+                    message = await channel.fetch_message(original_id)
+                    if message:
+                        author_id_msg = await ctx.send(f"Message author id: {message.author.id}")
+                        await ctx.message.delete(delay=30)
+                        await author_id_msg.delete(delay=30)
+                        return  # Exit the loop if message is found
+                except discord.NotFound:
+                    continue  # Continue searching if message is not found
+
+        # If the loop finishes and the message is still not found, send a message
+        await ctx.send("Paired message exists within json but not on Discord (tell bot owner this!)")
+    else:
+        await ctx.send("Paired message not found")
+
+    
 # Help command
 @bot.command()
 @has_create_webhook_permission()
@@ -335,16 +396,46 @@ async def help(ctx):
         value="List paired channels",
         inline=False
     )
+    
+    embed.add_field(
+        name="^nickname <user_mention|user_id|nickname_here|nothing>",
+        value="Set or display a nickname for yourself or another user",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="^get_author <message_id>",
+        value="Get the real author of a message with the message ID (useful for warns)",
+        inline=False
+    )
 
     embed.add_field(
         name="^help",
         value="Show this message",
         inline=False
     )
-
+    
     embed.add_field(
-        name="^nickname <user_mention|user_id|nickname_here|nothing>",
-        value="Set or display a nickname for yourself or another user",
+        name="^warn <user_mention|user_id> <reason>",
+        value="Warn a user with a reason",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="^warns <user_mention|user_id>",
+        value="See all the warns a user has",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="^remove_warn <user_mention|user_id> <warn_number>",
+        value="Remove a specific warn from a user",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="^edit_warn <user_mention|user_id> <warn_number>",
+        value="Edit a specific warn from a user",
         inline=False
     )
 
@@ -366,9 +457,9 @@ async def on_message(message):
             break
 
     if paired_channel_id:
-        global nicknames
-        if str(message.author.id) in nicknames: # Nickname exists
-            username = nicknames[str(message.author.id)] # Use nickname
+        global members
+        if str(message.author.id) in members and 'nickname' in members[str(message.author.id)]: # Nickname exists
+            username = members[str(message.author.id)]['nickname'] # Use nickname
         else: # Nickanme doesn't exist
             username = message.author.display_name # Use display_name
         webhook_url, _ = channel_pairs[str(paired_channel_id)]
@@ -461,8 +552,6 @@ async def on_raw_reaction_add(payload):
     if payload.member.id == bot.user.id:
         return
     global message_pairs
-    print(f"Reaction added: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
-    #print(message_pairs)
 
     # Check if the reacted message ID is in the message_pairs dictionary
     reacted_message_id = payload.message_id
@@ -479,7 +568,7 @@ async def on_raw_reaction_add(payload):
     emoji = str(payload.emoji)
     print(f"Reaction added: {emoji} by user {payload.user_id} to message {reacted_message_id} in channel {payload.channel_id}")
 
-    # Check if the target message is in a paired channel
+    # Check if the target message is in a paired channel 
     for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
             target_channel = bot.get_channel(target_channel_id)
@@ -492,7 +581,7 @@ async def on_raw_reaction_add(payload):
                     message_reactions[str(target_message_id)] = {}
             
                 if emoji in message_reactions[str(reacted_message_id)]:
-                    message_reactions[str(reacted_message_id)][emoji] += 1
+                    message_reactions[str(reacted_message_id)][emoji] += 1 # Count reactions from each message every single time? that way desync doesn't happen while offline???
                 else:
                     message_reactions[str(reacted_message_id)][emoji] = 1
                 save_data('message_reactions.json', message_reactions)
@@ -509,7 +598,7 @@ async def on_raw_reaction_add(payload):
                                 break
                         else:
                             # Add the reaction to the real message
-                            await target_message.add_reaction(payload.emoji.name)
+                            await target_message.add_reaction(f":{payload.emoji.name}:{payload.emoji.id}")
                             print(f"Reaction: {payload.emoji} mirrored to paired message: {target_message_id}")
                     else:
                         print("Paired message not found")
@@ -525,8 +614,6 @@ async def on_raw_reaction_remove(payload):
     if payload.user_id == bot.user.id:
         return
 
-    print(f"Reaction removed: {payload.emoji} by user {payload.user_id} in channel {payload.channel_id}")
-
     # Check if the reacted message ID is in the message_pairs dictionary
     reacted_message_id = payload.message_id
     if str(reacted_message_id) in message_pairs:
@@ -539,6 +626,7 @@ async def on_raw_reaction_remove(payload):
         user_message_id = target_message_id
     else:
         return
+    print(f"Reaction removed: {payload.emoji} by user {payload.user_id} to message {reacted_message_id} in channel {payload.channel_id}")
     reaction_channel = bot.get_channel(payload.channel_id)
     users_reacted = [] 
     reactMsg = await reaction_channel.fetch_message(payload.message_id)
@@ -578,8 +666,8 @@ async def on_raw_reaction_remove(payload):
 
                     if target_message:
                         if len(users_reacted) == 0:
-                            # Remove the reaction from the real message
-                            await target_message.remove_reaction(payload.emoji, bot.user)
+                            # Remove the reaction
+                            await target_message.remove_reaction(f":{payload.emoji.name}:{payload.emoji.id}", bot.user)
                             print(f"Reaction removed from paired message: {payload.emoji}")
                         else:
                             print(f"Reaction not removed from paired message: {payload.emoji} (Other users reacted)")
@@ -630,6 +718,4 @@ async def update_message_reaction_count(target_channel, reaction_channel, bot_me
 
 # Run the bot
 if __name__ == '__main__':
-    bot.run(TOKEN)
-    
-    
+    bot.run(TOKEN, reconnect=True)
