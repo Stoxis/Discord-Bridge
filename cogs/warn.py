@@ -4,17 +4,132 @@ import ast
 from datetime import datetime
 import os
 import traceback  
+import re
 
 import discord
 from discord import Member
 from discord.ext import commands
 from discord.ext.commands import has_permissions, MissingPermissions
 
+class bidict(dict):
+    def __init__(self, *args, **kwargs):
+        super(bidict, self).__init__(*args, **kwargs)
+        self.inverse = {}
+        for key, value in self.items():
+            self.inverse.setdefault(value, []).append(key) 
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.inverse[self[key]].remove(key) 
+        super(bidict, self).__setitem__(key, value)
+        self.inverse.setdefault(value, []).append(key)        
+
+    def __delitem__(self, key):
+        value = self[key] 
+        self.inverse.setdefault(value, []).remove(key)
+        if value in self.inverse and not self.inverse[value]: 
+            del self.inverse[value]
+        super(bidict, self).__delitem__(key)
+
+async def load_data(filename, global_var, default=None):
+    try:
+        with open(filename, 'r') as file:
+            data = json.load(file)
+            if isinstance(default, bidict):
+                globals()[global_var] = bidict(data)
+            else:
+                globals()[global_var] = data
+    except FileNotFoundError:
+        if isinstance(default, bidict):
+            globals()[global_var] = bidict()
+        else:
+            globals()[global_var] = default
+
 # These color constants are taken from discord.js library
 with open("embed_colors.txt") as f:
     data = f.read()
     colors = ast.literal_eval(data)
     color_list = [c for c in colors.values()]
+
+# Bi-Directional Dictionary to store message channel pairs
+message_channel_pairs = bidict()
+
+# Bi-Directional Dictionary to store message message pairs
+message_pairs = bidict()
+
+async def get_original_message(message_id, bot): # Outputs the key in a dictionary if either the key or value of that pair matches
+    global message_pairs
+    global message_channel_pairs
+    await load_data('message_pairs.json', 'message_pairs', bidict())
+    await load_data('message_channel_pairs.json', 'message_channel_pairs', bidict())
+    for key, value in message_pairs.items():
+        try:
+            if value == int(message_id) or key == str(message_id): # Key is real message id
+                channel = bot.get_channel(message_channel_pairs[str(key)])
+                real_message = await channel.fetch_message(key)
+                return real_message
+        except:
+            return None
+    return None  # Return None if the value is not found in the dictionary
+
+async def get_user_from_input(input_str, bot):
+    # Regular expression pattern to match user mentions and IDs
+    user_pattern = re.compile(r'<@!?(\d+)>|(\d+)')
+
+    # Try to find a match in the input string
+    match = user_pattern.match(input_str)
+
+    if match:
+        # Check if a user mention (<@user_id> or <@!user_id>) was found
+        try:
+            if match.group(1):
+                user_id = int(match.group(1))
+            else:
+                # Use the numeric ID if no mention was found
+                user_id = int(match.group(2))
+        except ValueError:
+            return None
+            
+        # Get the user object
+        for guild in bot.guilds:
+            try:
+                user = await guild.fetch_member(user_id)
+                if user:
+                    # User found, break out of the loop
+                    break
+            except discord.NotFound:
+                # User not found in this guild, continue to the next guild
+                user = None
+                continue
+        if user:
+            # Log successful user retrieval
+            print(f"User found: {user.name} (ID: {user.id})")
+            return user
+        else:
+            # Log user not found
+            print(f"User not found with ID: {user_id}")
+            return None
+    else:
+        return None
+
+async def check_user(user, bot):
+        user_obj = await get_user_from_input(user, bot)
+        if user_obj == None and user == None: # Nothing provided
+            await ctx.send("You forgot to provide a user and a reason as an argument.")
+            return
+        elif user_obj == None and user is not None: # Text channel(?)
+            message = await get_original_message(user, bot)
+            if message is not None:
+                user = await message.channel.guild.fetch_member(message.author.id)
+                return user
+            else:
+                await ctx.send("The user provided is not valid.")
+                return
+        elif user_obj is not None and user is not None:
+            user = user_obj
+            return user
+        else:
+            return
 
 class Warn(commands.Cog):
 
@@ -27,7 +142,12 @@ class Warn(commands.Cog):
         description='The famous warn command',
         usage='<@offender> called my mommy a fat :((((((( cri' # Todo: add direct messageID functionality for paired channels
     )
-    async def warn_command(self, ctx, user: discord.Member, *, reason: str):
+    @has_permissions(manage_messages=True)
+    async def warn_command(self, ctx, user=None, *, reason: str):
+        user = await check_user(user, self.bot)
+        if user.guild_permissions.manage_messages == True:
+            await ctx.send("The specified user has the \"Manage Messages\" permission (or higher) inside the guild/server.")
+            return           
         if user.id == self.bot.user.id:
             await ctx.send("Oh, REALLY now, huh? I do my best at maintaining this server and THIS is how you treat me? Screw this..")
             return
@@ -36,9 +156,6 @@ class Warn(commands.Cog):
             return
         if user == ctx.author:
             await ctx.send("Why the heck would you warn yourself? You hate yourself THAT much?")
-            return
-        if user.guild_permissions.manage_messages:
-            await ctx.send("The specified user has the \"Manage Messages\" permission (or higher) inside the guild/server.")
             return
 
         dt_string = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -133,7 +250,8 @@ class Warn(commands.Cog):
         usage='<@offender>',
         aliases=['warnings']
     )
-    async def warns_command(self, ctx, user:discord.Member):
+    async def warns_command(self, ctx, user=None):
+        user = await check_user(user, self.bot)
         try:
             with open("members.json") as f:
                 data = json.load(f)
@@ -203,7 +321,8 @@ class Warn(commands.Cog):
         aliases=['removewarn','clearwarn']
     )
     @has_permissions(manage_messages=True)
-    async def remove_warn_command(self, ctx, user: discord.Member, *, warn: str):
+    async def remove_warn_command(self, ctx, user=None, *, warn: str):
+        user = await check_user(user, self.bot)
         try:
             with open("members.json") as f:
                 data = json.load(f)
@@ -290,7 +409,8 @@ class Warn(commands.Cog):
         aliases=['editwarn','changewarn']
     )
     @has_permissions(manage_messages=True)
-    async def edit_warn_command(self, ctx, user: discord.Member, *, warn: str):
+    async def edit_warn_command(self, ctx, user=None, *, warn: str):
+        user = await check_user(user, self.bot)
         try:
             with open("members.json") as f:
                 data = json.load(f)

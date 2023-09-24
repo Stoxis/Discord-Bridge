@@ -1,6 +1,7 @@
 import traceback  
 import discord
 from discord.ext import commands
+from discord.ext.commands import has_permissions, MissingPermissions
 import json
 import aiohttp
 import re
@@ -15,6 +16,8 @@ import os
 # Todo add slash command functionality
 # Todo Profile command that displays real & fake user information
 # Todo Add multi-bridge support so three channels can be bridged in a row (how to do without database?)
+
+# todo: add permissions checking to get_author and warning commands
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -46,7 +49,10 @@ class bidict(dict):
             del self.inverse[value]
         super(bidict, self).__delitem__(key)
 
-# Bi-Directional Dictionary to store message pairs
+# Bi-Directional Dictionary to store message channel pairs
+message_channel_pairs = bidict()
+
+# Bi-Directional Dictionary to store message message pairs
 message_pairs = bidict()
 
 # Dictionary to store reactions to messages
@@ -93,6 +99,14 @@ def has_create_webhook_permission():
             return False
 
     return commands.check(predicate)
+
+def get_original_message(message_id): # Outputs the key in a dictionary if either the key or value of that pair matches
+    for key, value in message_pairs.items():
+        if value == message_id or key == message_id: # Key is real message id
+            channel = bot.get_channel(message_channel_pairs[str(key)])
+            real_message = channel.fetch_message(key)
+            return real_message
+    return None  # Return None if the value is not found in the dictionary
 
 async def get_channel_from_input(input_str):
     # Regular expression pattern to match channel mentions and IDs
@@ -153,6 +167,7 @@ async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     load_data('channel_pairs.json', 'channel_pairs', {})
     load_data('message_pairs.json', 'message_pairs', bidict())
+    load_data('message_channel_pairs.json', 'message_channel_pairs', bidict())
     load_data('message_reactions.json', 'message_reactions', {})
     load_data('members.json', 'members', {})
     cogs = []
@@ -324,6 +339,7 @@ async def nickname(ctx, *, args=None):
             await ctx.send(embed=discord.Embed(description="No nickname is set for you."))
 
 @bot.command()
+@has_permissions(manage_messages=True) # Todo: use the message_channel_pairs command to get the channel
 async def get_author(ctx, message_id=None):
     if message_id is None:
         await ctx.send("Please provide a message ID.")
@@ -366,7 +382,6 @@ async def get_author(ctx, message_id=None):
         await ctx.send("Paired message exists within json but not on Discord (tell bot owner this!)")
     else:
         await ctx.send("Paired message not found")
-
     
 # Help command
 @bot.command()
@@ -404,7 +419,7 @@ async def help(ctx):
     )
     
     embed.add_field(
-        name="^get_author <message_id>",
+        name="^get_author <paired_message_id>",
         value="Get the real author of a message with the message ID (useful for warns)",
         inline=False
     )
@@ -416,25 +431,31 @@ async def help(ctx):
     )
     
     embed.add_field(
-        name="^warn <user_mention|user_id> <reason>",
+        name="^purge <amount>",
+        value="Deletes a specified number of messages in the current and paired channel",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="^warn <user_mention|user_id|paired_message_id> <reason>",
         value="Warn a user with a reason",
         inline=False
     )
     
     embed.add_field(
-        name="^warns <user_mention|user_id>",
+        name="^warns <user_mention|user_id|paired_message_id>",
         value="See all the warns a user has",
         inline=False
     )
     
     embed.add_field(
-        name="^remove_warn <user_mention|user_id> <warn_number>",
+        name="^remove_warn <user_mention|user_id|paired_message_id> <warn_number>",
         value="Remove a specific warn from a user",
         inline=False
     )
     
     embed.add_field(
-        name="^edit_warn <user_mention|user_id> <warn_number>",
+        name="^edit_warn <user_mention|user_id|paired_message_id> <warn_number>",
         value="Edit a specific warn from a user",
         inline=False
     )
@@ -447,27 +468,31 @@ async def help(ctx):
 async def on_message(message):
     if message.author.bot:
         return
-    global message_pairs
 
     # Find the paired channel for the current channel
     paired_channel_id = None
     for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if message.channel.id == int(channel_id):
             paired_channel_id = paired_id
+            global message_pairs
+            global message_channel_pairs
+            global members
+            if str(message.author.id) in members and 'nickname' in members[str(message.author.id)]: # Nickname exists
+                username = members[str(message.author.id)]['nickname'] # Use nickname
+            else: # Nickanme doesn't exist
+                username = message.author.display_name # Use display_name
+            webhook_url, _ = channel_pairs[str(paired_id)]
+            async with aiohttp.ClientSession() as session:
+                webhook = discord.Webhook.from_url(webhook_url, session=session)
+                response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
+                message_pairs[str(message.id)] = response.id
+                save_data('message_pairs.json', message_pairs)
+                message_channel_pairs[str(message.id)] = message.channel.id # Real message
+                message_channel_pairs[str(response.id)] = response.channel.id # Mirrored message
+                save_data('message_channel_pairs.json', message_channel_pairs)
             break
 
-    if paired_channel_id:
-        global members
-        if str(message.author.id) in members and 'nickname' in members[str(message.author.id)]: # Nickname exists
-            username = members[str(message.author.id)]['nickname'] # Use nickname
-        else: # Nickanme doesn't exist
-            username = message.author.display_name # Use display_name
-        webhook_url, _ = channel_pairs[str(paired_channel_id)]
-        async with aiohttp.ClientSession() as session:
-            webhook = discord.Webhook.from_url(webhook_url, session=session)
-            response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
-            message_pairs[str(message.id)] = response.id
-            save_data('message_pairs.json', message_pairs)
+
 
     await bot.process_commands(message)
 
@@ -485,7 +510,11 @@ async def on_raw_message_delete(payload):
         del message_pairs[target_message_id]
     else:
         return
+    global message_channel_pairs
+    if str(message_id) in message_channel_pairs:
+        del message_channel_pairs[str(message_id)]
     save_data('message_pairs.json', message_pairs)
+    save_data('message_channel_pairs.json', message_channel_pairs)
     
     # Find the paired channel for the current channel
     paired_channel_id = None
@@ -500,6 +529,58 @@ async def on_raw_message_delete(payload):
                     await target_message.delete()
                 except discord.NotFound:
                     print(f"Paired message({target_message_id}) not found")
+
+def delete_pair(m):
+    global message_pairs
+    global message_channel_pairs
+    message_id = m.id
+    if str(message_id) in message_pairs:
+        del message_pairs[str(message_id)] #message_id is real msg
+    elif int(message_id) in message_pairs.inverse:
+        target_message_id = message_pairs.inverse[int(message_id)][0] #message_id is bot msg
+        del message_pairs[target_message_id]
+    if str(message_id) in message_channel_pairs:
+        del message_channel_pairs[str(message_id)]
+    #print(message_id)
+    return True
+
+@bot.command()
+@has_permissions(administrator=True)
+async def purge(ctx, amount: int):
+    if str(ctx.channel.id) not in channel_pairs:
+        await ctx.send("This channel is not paired with another channel.")
+        return
+    global message_pairs
+    global message_channel_pairs
+    first = True
+    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+        if str(ctx.channel.id) == str(channel_id):
+            paired_channel = bot.get_channel(paired_id)
+            
+            if not paired_channel:
+                #await ctx.send("Paired channel not found.")
+                continue
+            
+            if first: # Just incase there's multiple paired channels
+                # Delete messages in the current channel
+                deleted = await ctx.channel.purge(limit=amount + 1, check=delete_pair)  # +1 to include the purge command message itself
+                first = False
+            
+            # Delete messages in the paired channel
+            deleted_paired = await paired_channel.purge(limit=amount + 1, check=delete_pair)  # +1 to include the purge command message itself
+            
+            # Update message_pairs and message_channel_pairs to reflect message purge
+            save_data('message_pairs.json', message_pairs)
+            save_data('message_channel_pairs.json', message_channel_pairs)
+            
+            purge_message = await ctx.send(f"Purged {len(deleted)-1} messages in this channel and {len(deleted_paired)-1} messages in the paired channel.")
+            await purge_message.delete(delay=30)
+            break
+    else:
+        deleted = await ctx.channel.purge(limit=amount + 1)
+        purge_message = await ctx.send(f"Purged {len(deleted)-1} messages.")
+        await purge_message.delete(delay=30)
+        
 
 # Event listener for message edits
 @bot.event
@@ -598,7 +679,7 @@ async def on_raw_reaction_add(payload):
                                 break
                         else:
                             # Add the reaction to the real message
-                            await target_message.add_reaction(f":{payload.emoji.name}:{payload.emoji.id}")
+                            await target_message.add_reaction(payload.emoji)
                             print(f"Reaction: {payload.emoji} mirrored to paired message: {target_message_id}")
                     else:
                         print("Paired message not found")
@@ -667,7 +748,7 @@ async def on_raw_reaction_remove(payload):
                     if target_message:
                         if len(users_reacted) == 0:
                             # Remove the reaction
-                            await target_message.remove_reaction(f":{payload.emoji.name}:{payload.emoji.id}", bot.user)
+                            await target_message.remove_reaction(payload.emoji, bot.user)
                             print(f"Reaction removed from paired message: {payload.emoji}")
                         else:
                             print(f"Reaction not removed from paired message: {payload.emoji} (Other users reacted)")
