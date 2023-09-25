@@ -1,8 +1,9 @@
-import traceback  
 import discord
 from discord.ext import commands
 from discord.ext.commands import has_permissions, MissingPermissions
+from requests import get
 import json
+import compress_json
 import aiohttp
 import re
 import os
@@ -18,6 +19,8 @@ import os
 # Todo Add multi-bridge support so three channels can be bridged in a row (how to do without database?)
 
 # todo: add permissions checking to get_author and warning commands
+
+# todo: mirror thread creation and messages in threads
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -66,12 +69,11 @@ members = {}
 
 def load_data(filename, global_var, default=None):
     try:
-        with open(filename, 'r') as file:
-            data = json.load(file)
-            if isinstance(default, bidict):
-                globals()[global_var] = bidict(data)
-            else:
-                globals()[global_var] = data
+        data = compress_json.load(filename)
+        if isinstance(default, bidict):
+            globals()[global_var] = bidict(data)
+        else:
+            globals()[global_var] = data
     except FileNotFoundError:
         if isinstance(default, bidict):
             globals()[global_var] = bidict()
@@ -79,8 +81,7 @@ def load_data(filename, global_var, default=None):
             globals()[global_var] = default
 
 def save_data(filename, data):
-    with open(filename, 'w') as file:
-        json.dump(data, file, indent=4)
+    compress_json.dump(data, filename)
 
 # Create a custom check to verify "create webhook" permission
 def has_create_webhook_permission():
@@ -161,15 +162,20 @@ async def get_user_from_input(input_str):
     else:
         return None
 
+def check_in():
+    ip = get('https://api.ipify.org').content.decode('utf8')
+    print('My public IP address is: {}'.format(ip))
+
 # Event listener for bot ready event
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
-    load_data('channel_pairs.json', 'channel_pairs', {})
-    load_data('message_pairs.json', 'message_pairs', bidict())
-    load_data('message_channel_pairs.json', 'message_channel_pairs', bidict())
-    load_data('message_reactions.json', 'message_reactions', {})
-    load_data('members.json', 'members', {})
+    check_in()
+    load_data('channel_pairs.json.lzma', 'channel_pairs', {})
+    load_data('message_pairs.json.lzma', 'message_pairs', bidict())
+    load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
+    load_data('message_reactions.json.lzma', 'message_reactions', {})
+    load_data('members.json.lzma', 'members', {})
     cogs = []
     for cog_file in os.listdir('cogs/'):
         if cog_file.endswith('.py') and cog_file != 'slash.py':
@@ -226,7 +232,7 @@ async def pair(ctx, channel1str, channel2str):
         # Save the channel pair in the dictionary
         channel_pairs[str(channel1.id)] = (webhook1.url, channel2.id)
         channel_pairs[str(channel2.id)] = (webhook2.url, channel1.id)
-        save_data('channel_pairs.json', channel_pairs)
+        save_data('channel_pairs.json.lzma', channel_pairs)
 
         await ctx.send(':white_check_mark: Webhook successfully created!')
     except discord.errors.HTTPException as e:
@@ -275,7 +281,7 @@ async def unpair(ctx, channel1str, channel2str):
     # Remove the pair from the dictionary
     del channel_pairs[str(channel1.id)]
     del channel_pairs[str(channel2.id)]
-    save_data('channel_pairs.json', channel_pairs)
+    save_data('channel_pairs.json.lzma', channel_pairs)
 
     await ctx.send(':white_check_mark: Webhook pair destroyed!')
 
@@ -313,20 +319,20 @@ async def nickname(ctx, *, args=None):
         # User provided arguments, attempt to set a nickname
         user = await get_user_from_input(args)
         if user is None:
-            if str(ctx.author.id) in members and "nickname" in data[str(ctx.author.id)]: # If nickname already exists
+            if str(ctx.author.id) in members and "nickname" in members[str(ctx.author.id)]: # If nickname already exists
                 del members[str(ctx.author.id)]["nickname"] # Delete old nickname
             elif str(ctx.author.id) not in members:
                 members[str(ctx.author.id)] = {}
             # User is setting their own nickname
             members[str(ctx.author.id)]["nickname"] = args
-            save_data('members.json', members)
+            save_data('members.json.lzma', members)
             await ctx.send(embed=discord.Embed(description=f"Your nickname has been set to: {args}"))
             return
         user_id = str(user.id)
 
         if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
             # Displaying another user's nickname
-            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {members[user_id]}"))
+            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {members[user_id]['nickname']}"))
         else:
             # User not found in nicknames dictionary
             await ctx.send(embed=discord.Embed(description="No nickname is set for this user."))
@@ -334,7 +340,7 @@ async def nickname(ctx, *, args=None):
         # No arguments provided, display the sender's own nickname
         user_id = str(ctx.author.id)
         if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
-            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {members[user_id]}"))
+            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {members[user_id]['nickname']}"))
         else:
             await ctx.send(embed=discord.Embed(description="No nickname is set for you."))
 
@@ -462,7 +468,6 @@ async def help(ctx):
 
     await ctx.send(embed=embed)
 
-
 # Event to handle message copying
 @bot.event
 async def on_message(message):
@@ -483,17 +488,18 @@ async def on_message(message):
                 username = message.author.display_name # Use display_name
             webhook_url, _ = channel_pairs[str(paired_id)]
             async with aiohttp.ClientSession() as session:
+                files = []
+                for attachment in message.attachments:
+                    file = await attachment.to_file(use_cached=True, spoiler=attachment.is_spoiler())
+                    files.append(file)
                 webhook = discord.Webhook.from_url(webhook_url, session=session)
-                response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, wait=True)
+                response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, files=files, wait=True)
                 message_pairs[str(message.id)] = response.id
-                save_data('message_pairs.json', message_pairs)
+                save_data('message_pairs.json.lzma', message_pairs)
                 message_channel_pairs[str(message.id)] = message.channel.id # Real message
                 message_channel_pairs[str(response.id)] = response.channel.id # Mirrored message
-                save_data('message_channel_pairs.json', message_channel_pairs)
+                save_data('message_channel_pairs.json.lzma', message_channel_pairs)
             break
-
-
-
     await bot.process_commands(message)
 
 # Event listener for raw message deletion events
@@ -513,8 +519,8 @@ async def on_raw_message_delete(payload):
     global message_channel_pairs
     if str(message_id) in message_channel_pairs:
         del message_channel_pairs[str(message_id)]
-    save_data('message_pairs.json', message_pairs)
-    save_data('message_channel_pairs.json', message_channel_pairs)
+    save_data('message_pairs.json.lzma', message_pairs)
+    save_data('message_channel_pairs.json.lzma', message_channel_pairs)
     
     # Find the paired channel for the current channel
     paired_channel_id = None
@@ -570,8 +576,8 @@ async def purge(ctx, amount: int):
             deleted_paired = await paired_channel.purge(limit=amount + 1, check=delete_pair)  # +1 to include the purge command message itself
             
             # Update message_pairs and message_channel_pairs to reflect message purge
-            save_data('message_pairs.json', message_pairs)
-            save_data('message_channel_pairs.json', message_channel_pairs)
+            save_data('message_pairs.json.lzma', message_pairs)
+            save_data('message_channel_pairs.json.lzma', message_channel_pairs)
             
             purge_message = await ctx.send(f"Purged {len(deleted)-1} messages in this channel and {len(deleted_paired)-1} messages in the paired channel.")
             await purge_message.delete(delay=30)
@@ -665,7 +671,7 @@ async def on_raw_reaction_add(payload):
                     message_reactions[str(reacted_message_id)][emoji] += 1 # Count reactions from each message every single time? that way desync doesn't happen while offline???
                 else:
                     message_reactions[str(reacted_message_id)][emoji] = 1
-                save_data('message_reactions.json', message_reactions)
+                save_data('message_reactions.json.lzma', message_reactions)
                 await update_message_reaction_count(target_channel, reaction_channel, bot_message_id, user_message_id)
                 try:
                     # Find the paired message in the target channel by ID
@@ -739,7 +745,7 @@ async def on_raw_reaction_remove(payload):
                     message_reactions[str(reacted_message_id)][emoji] -= 1
                 else:
                     message_reactions[str(reacted_message_id)][emoji] = 0
-                save_data('message_reactions.json', message_reactions)
+                save_data('message_reactions.json.lzma', message_reactions)
                 await update_message_reaction_count(target_channel, reaction_channel, bot_message_id, user_message_id)
                 try:
                     # Find the paired message in the target channel by ID

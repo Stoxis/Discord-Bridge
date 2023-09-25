@@ -2,9 +2,16 @@ import json
 import random
 import ast
 from datetime import datetime
-import os
-import traceback  
 import re
+import compress_json
+
+#compress_json.dump(D, "filepath.json.gz") # for a gzip file
+#compress_json.dump(D, "filepath.json.bz") # for a bz2 file
+#compress_json.dump(D, "filepath.json.lzma") # for a lzma file
+
+#D1 = compress_json.load("filepath.json.gz") # for loading a gzip file
+#D2 = compress_json.load("filepath.json.bz") # for loading a bz2 file
+#D3 = compress_json.load("filepath.json.lzma") # for loading a lzma file
 
 import discord
 from discord import Member
@@ -31,14 +38,13 @@ class bidict(dict):
             del self.inverse[value]
         super(bidict, self).__delitem__(key)
 
-async def load_data(filename, global_var, default=None):
+def load_data(filename, global_var, default=None):
     try:
-        with open(filename, 'r') as file:
-            data = json.load(file)
-            if isinstance(default, bidict):
-                globals()[global_var] = bidict(data)
-            else:
-                globals()[global_var] = data
+        data = compress_json.load(filename)
+        if isinstance(default, bidict):
+            globals()[global_var] = bidict(data)
+        else:
+            globals()[global_var] = data
     except FileNotFoundError:
         if isinstance(default, bidict):
             globals()[global_var] = bidict()
@@ -60,8 +66,8 @@ message_pairs = bidict()
 async def get_original_message(message_id, bot): # Outputs the key in a dictionary if either the key or value of that pair matches
     global message_pairs
     global message_channel_pairs
-    await load_data('message_pairs.json', 'message_pairs', bidict())
-    await load_data('message_channel_pairs.json', 'message_channel_pairs', bidict())
+    await load_data('message_pairs.json.lzma', 'message_pairs', bidict())
+    await load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
     for key, value in message_pairs.items():
         try:
             if value == int(message_id) or key == str(message_id): # Key is real message id
