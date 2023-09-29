@@ -4,19 +4,14 @@ import ast
 from datetime import datetime
 import re
 import compress_json
-
-#compress_json.dump(D, "filepath.json.gz") # for a gzip file
-#compress_json.dump(D, "filepath.json.bz") # for a bz2 file
-#compress_json.dump(D, "filepath.json.lzma") # for a lzma file
-
-#D1 = compress_json.load("filepath.json.gz") # for loading a gzip file
-#D2 = compress_json.load("filepath.json.bz") # for loading a bz2 file
-#D3 = compress_json.load("filepath.json.lzma") # for loading a lzma file
+import traceback
 
 import discord
 from discord import Member
 from discord.ext import commands
 from discord.ext.commands import has_permissions, MissingPermissions
+
+# Todo nicknames for mirrored embeds
 
 class bidict(dict):
     def __init__(self, *args, **kwargs):
@@ -63,11 +58,26 @@ message_channel_pairs = bidict()
 # Bi-Directional Dictionary to store message message pairs
 message_pairs = bidict()
 
+async def get_opposite_message(message_id, bot): # Outputs the key in a dictionary if either the value matches or vice versa
+    global message_pairs
+    global message_channel_pairs
+    load_data('message_pairs.json.lzma', 'message_pairs', bidict())
+    load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
+    for key, value in message_pairs.items():
+        try:
+            if value == int(message_id) or key == str(message_id): # Key is real message id
+                channel = bot.get_channel(message_channel_pairs[str(value)])
+                message = await channel.fetch_message(value)
+                return channel, message # This'll probabably break if there's multiple channel pairs since it won't return an array containing all the results, just the first channel found
+        except:
+            return None, None
+    return None, None  # Return None if the value is not found in the dictionary
+
 async def get_original_message(message_id, bot): # Outputs the key in a dictionary if either the key or value of that pair matches
     global message_pairs
     global message_channel_pairs
-    await load_data('message_pairs.json.lzma', 'message_pairs', bidict())
-    await load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
+    load_data('message_pairs.json.lzma', 'message_pairs', bidict())
+    load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
     for key, value in message_pairs.items():
         try:
             if value == int(message_id) or key == str(message_id): # Key is real message id
@@ -83,7 +93,10 @@ async def get_user_from_input(input_str, bot):
     user_pattern = re.compile(r'<@!?(\d+)>|(\d+)')
 
     # Try to find a match in the input string
-    match = user_pattern.match(input_str)
+    try:
+        match = user_pattern.match(input_str)
+    except TypeError:
+        return None
 
     if match:
         # Check if a user mention (<@user_id> or <@!user_id>) was found
@@ -118,10 +131,10 @@ async def get_user_from_input(input_str, bot):
     else:
         return None
 
-async def check_user(user, bot):
+async def check_user(user, bot, ctx):
         user_obj = await get_user_from_input(user, bot)
         if user_obj == None and user == None: # Nothing provided
-            await ctx.send("You forgot to provide a user and a reason as an argument.")
+            await ctx.send("You forgot to provide a user as an argument.")
             return
         elif user_obj == None and user is not None: # Text channel(?)
             message = await get_original_message(user, bot)
@@ -150,7 +163,7 @@ class Warn(commands.Cog):
     )
     @has_permissions(manage_messages=True)
     async def warn_command(self, ctx, user=None, *, reason: str):
-        user = await check_user(user, self.bot)
+        user = await check_user(user, self.bot, ctx)
         if user.guild_permissions.manage_messages == True:
             await ctx.send("The specified user has the \"Manage Messages\" permission (or higher) inside the guild/server.")
             return           
@@ -168,8 +181,7 @@ class Warn(commands.Cog):
 
         # Load existing data from the file
         try:
-            with open("members.json", "r") as f:
-                data = json.load(f)
+            data = compress_json.load("members.json.lzma")
         except FileNotFoundError:
             # If the file doesn't exist, initialize an empty dictionary
             data = {}
@@ -208,8 +220,7 @@ class Warn(commands.Cog):
             data[str(user.id)].update(new_warn)
 
         # Write the modified data back to the file, overwriting the previous contents
-        with open("members.json", "w") as f:
-            json.dump(data, f, indent=4)
+        compress_json.dump(data, "members.json.lzma")
 
         # Create and send an embed showing that the user has been warned successfully
         embed = discord.Embed(
@@ -226,11 +237,17 @@ class Warn(commands.Cog):
             value=f"Warner: {ctx.author.name} (<@{ctx.author.id}>)\nReason: {reason}\nChannel: <#{str(ctx.channel.id)}>\nDate and Time: {dt_string}",
             inline=True
         )
+        # Creates and sends embed(s)
         await ctx.send(
             content="Successfully added new warn.",
             embed=embed
         )
-        # Creates and sends embed
+        paired_channel, paired_message = await get_opposite_message(ctx.message.id, self.bot)
+        if paired_channel:
+                await paired_channel.send(
+                content="Successfully added new warn.",
+                embed=embed
+            )
     @warn_command.error
     async def warn_handler(self, ctx, error):
         if isinstance(error, commands.MissingPermissions):
@@ -247,8 +264,10 @@ class Warn(commands.Cog):
                 # Author did not specify the reason
                 await ctx.send("{0.author.name}, you forgot to specify a reason. *(commands.MissingRequiredArgument error, action cancelled)*".format(ctx))
                 return
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
         print(error)
-        await ctx.send(error)
+        await ctx.send(error + " <@1143793302701879416>")
 
     @commands.command(
         name='warns',
@@ -257,18 +276,25 @@ class Warn(commands.Cog):
         aliases=['warnings']
     )
     async def warns_command(self, ctx, user=None):
-        user = await check_user(user, self.bot)
+        user = await check_user(user, self.bot, ctx)
+        paired_channel, paired_message = await get_opposite_message(ctx.message.id, self.bot)
         try:
-            with open("members.json") as f:
-                data = json.load(f)
+            data = compress_json.load("members.json.lzma")
         except FileNotFoundError:
             await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] does not have any warns.")
+            if paired_channel:
+                await paired_channel.send(f"{ctx.author.name}, user [{user.name}] does not have any warns.")
             return
     
-        if 'warns' not in data.get(str(user.id), {}) or data[str(user.id)].get('warns') <= 0:
-            await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] does not have any warns.")
+        try:
+            if 'warns' not in data.get(str(user.id), {}) or data[str(user.id)].get('warns') <= 0:
+                await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] does not have any warns.")
+                if paired_channel:
+                    await paired_channel.send(f"{ctx.author.name}, user [{user.name}] does not have any warns.")
+                return
+        except:
+            #raise commands.CommandInvokeError("user")
             return
-    
         warn_amount = data[str(user.id)].get("warns", 0)
         last_noted_name = data[str(user.id)].get("username", user.name)
         warns_word = "warn" if warn_amount == 1 else "warns"
@@ -305,33 +331,46 @@ class Warn(commands.Cog):
                 value=f"Warner: {warner_name} (<@{warner_id}>)\nReason: {warn_reason}\nChannel: <#{warn_channel}>\nDate and Time: {warn_datetime}",
                 inline=True
             )
-    
+        # Send embed(s).
         await ctx.send(
             content=None,
             embed=embed
         )
-        # Send embed.
+        if paired_channel:
+            await paired_channel.send(
+                content=None,
+                embed=embed
+            )
     @warns_command.error
     async def warns_handler(self, ctx, error):
         if isinstance(error, commands.MissingRequiredArgument):
             if error.param.name == 'user':
                 # Author did not specify user
                 await ctx.send("Please mention someone to verify their warns.")
-                return
-        await ctx.send(error)
+            else:
+                await ctx.send("Command usage: `^warns <user>`")
+        elif isinstance(error, commands.CommandInvokeError):
+            await ctx.send("An error occurred while processing the command. Please try again later.")
+            traceback_str = traceback.format_exc()
+            print(traceback_str)
+            print(error)
+        else:
+            await ctx.send(f"An error occurred: {error}")
+            traceback_str = traceback.format_exc()
+            print(traceback_str)
+            print(error)
 
     @commands.command(
         name='remove_warn',
         description='Removes a specific warn from a specific user.',
         usage='@user 2',
-        aliases=['removewarn','clearwarn']
+        aliases=['removewarn','clearwarn','warn_remove']
     )
     @has_permissions(manage_messages=True)
     async def remove_warn_command(self, ctx, user=None, *, warn: str):
-        user = await check_user(user, self.bot)
+        user = await check_user(user, self.bot, ctx)
         try:
-            with open("members.json") as f:
-                data = json.load(f)
+            data = compress_json.load("members.json.lzma")
         except FileNotFoundError:
             await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] does not have any warns.")
             return
@@ -371,8 +410,10 @@ class Warn(commands.Cog):
     
         def check(ms):
             return ms.channel == ctx.message.channel and ms.author == ctx.message.author
-    
+        paired_channel, paired_message = await get_opposite_message(ctx.message.id, self.bot)
         await ctx.send(content='Are you sure you want to remove this warn? (Reply with y or n)', embed=confirmation_embed)
+        if paired_channel:
+            await paired_channel.send(content='Are you sure you want to remove this warn? (Reply with y or n)', embed=confirmation_embed)
         msg = await self.bot.wait_for('message', check=check)
         reply = msg.content.lower()
     
@@ -384,8 +425,10 @@ class Warn(commands.Cog):
                     data[str(user.id)][str(x)] = data[str(user.id)][str(x + 1)]
                     del data[str(user.id)][str(x + 1)]
                 data[str(user.id)]['warns'] = warn_amount - 1
-            json.dump(data, open("members.json", "w"), indent=4)
+            compress_json.dump(data, "members.json.lzma")
             await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] has had their warn removed.")
+            if paired_channel:
+                await paired_channel.send(f"{ctx.author.name}, user [{user.name} ({user.id})] has had their warn removed.")
         elif reply in ('n', 'no', 'cancel'):
             await ctx.send("Alright, action cancelled.")
         else:
@@ -416,10 +459,9 @@ class Warn(commands.Cog):
     )
     @has_permissions(manage_messages=True)
     async def edit_warn_command(self, ctx, user=None, *, warn: str):
-        user = await check_user(user, self.bot)
+        user = await check_user(user, self.bot, ctx)
         try:
-            with open("members.json") as f:
-                data = json.load(f)
+            data = compress_json.load("members.json.lzma")
         except FileNotFoundError:
             await ctx.send(f"{ctx.author.name}, user [{user.name} ({user.id})] does not have any warns.")
             return
@@ -461,16 +503,19 @@ class Warn(commands.Cog):
             icon_url=ctx.message.author.display_avatar.url,
             url=f"https://discord.com/users/{ctx.message.author.id}/"
         )
-    
+        paired_channel, paired_message = await get_opposite_message(ctx.message.id, self.bot)
         await ctx.send(content='Are you sure you want to edit this warn like this? (Reply with y/yes or n/no)', embed=confirmation_embed)
-    
+        if paired_channel:
+                await paired_channel.send(content='Are you sure you want to edit this warn like this? (Reply with y/yes or n/no)', embed=confirmation_embed)
         msg = await self.bot.wait_for('message', check=check)
         reply = msg.content.lower()
     
         if reply in ('y', 'yes', 'confirm'):
             specified_warn['reason'] = warn_new_reason
-            json.dump(data, open("members.json", "w"), indent=4)
+            compress_json.dump(data, "members.json.lzma")
             await ctx.send(f"[{ctx.author.name}], user [{user.name} ({user.id})] has had their warn edited.")
+            if paired_channel:
+                    await paired_channel.send(f"[{ctx.author.name}], user [{user.name} ({user.id})] has had their warn edited.")
         elif reply in ('n', 'no', 'cancel'):
             await ctx.send("Alright, action cancelled.")
         else:

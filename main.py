@@ -1,4 +1,5 @@
 import discord
+from discord.ui import Button, View
 from discord.ext import commands
 from discord.ext.commands import has_permissions, MissingPermissions
 from requests import get
@@ -21,6 +22,10 @@ import os
 # todo: add permissions checking to get_author and warning commands
 
 # todo: mirror thread creation and messages in threads
+
+# todo: mirror replies
+
+# todo: rewrite channel_pairs for loops to use if `value` in `dict` and directly reference the key value pairs instead of looping through the entire dictionary
 
 # Bot token and prefix
 TOKEN = 'Token_here'
@@ -166,12 +171,39 @@ def check_in():
     ip = get('https://api.ipify.org').content.decode('utf8')
     print('My public IP address is: {}'.format(ip))
 
+def update_channel_pairs_format(channel_pairs):
+    try:
+        for ch1, (webhook_url, ch2) in channel_pairs.items():
+            channel_pairs[str(ch1)]["webhook_url"]
+            return channel_pairs, False
+    except:
+        print("old dict format detected, converting...")
+        new_channel_pairs = {}
+        for ch1, (webhook_url, ch2) in channel_pairs.items():
+            new_channel_pairs[str(ch1)] = {
+                "webhook_url": webhook_url,
+                "paired_id": ch2
+            }
+        else:
+            return new_channel_pairs, True
+
+
 # Event listener for bot ready event
 @bot.event
 async def on_ready():
+    global channel_pairs
     print(f'Logged in as {bot.user.name} ({bot.user.id})')
     check_in()
+    
     load_data('channel_pairs.json.lzma', 'channel_pairs', {})
+    # Check if channel_pairs is in the old format
+    if isinstance(globals()['channel_pairs'], dict):
+        # Convert to the new format
+        channel_pairs, isFormatOld = update_channel_pairs_format(globals()['channel_pairs'])
+        if isFormatOld:
+            # If old format save the updated channel_pairs to the file
+            save_data('channel_pairs.json.lzma', channel_pairs)
+    
     load_data('message_pairs.json.lzma', 'message_pairs', bidict())
     load_data('message_channel_pairs.json.lzma', 'message_channel_pairs', bidict())
     load_data('message_reactions.json.lzma', 'message_reactions', {})
@@ -192,7 +224,7 @@ async def on_ready():
             print(f"Tried to load a cog/extension that was already loaded ({cog})")
 
 # Command to pair two channels
-@bot.command()
+@bot.command(aliases=['pairchannels', 'pairch', 'pairchan', 'link', 'linkchans', 'linkchannels'])
 @has_create_webhook_permission()
 async def pair(ctx, channel1str, channel2str):
     global channel_pairs
@@ -230,8 +262,17 @@ async def pair(ctx, channel1str, channel2str):
         webhook2 = await channel2.create_webhook(name='PairBot Webhook')
 
         # Save the channel pair in the dictionary
-        channel_pairs[str(channel1.id)] = (webhook1.url, channel2.id)
-        channel_pairs[str(channel2.id)] = (webhook2.url, channel1.id)
+        channel_pairs[channel1.id] = {
+            "webhook_url": webhook1.url,
+            "paired_id": channel2.id
+        }
+        
+        channel_pairs[channel2.id] = {
+            "webhook_url": webhook2.url,
+            "paired_id": channel1.id
+        }
+        
+        # Save the updated channel_pairs to the file
         save_data('channel_pairs.json.lzma', channel_pairs)
 
         await ctx.send(':white_check_mark: Webhook successfully created!')
@@ -242,59 +283,63 @@ async def pair(ctx, channel1str, channel2str):
             await ctx.send(':x: An error occurred while creating the webhook.')
 
 # Command to unpair two channels
-@bot.command()
+@bot.command(aliases=['unpairch', 'unpairchan', 'unlink', 'unlinkchans', 'unlinkchannels'])
 @has_create_webhook_permission()
 async def unpair(ctx, channel1str, channel2str):
     global channel_pairs
-    # Fix bug: Only remove this pair, if channel1 or 2 are linked to other non-specified channels, preserve those connections (current code unpairs those as well)
+
+    # Fix bug: Only remove this pair, if channel1 or 2 are linked to other non-specified channels, preserve those connections
     channel1 = await get_channel_from_input(channel1str)
     channel2 = await get_channel_from_input(channel2str)
+
     # Check if the channels exist
-    fetched_channels = None
-    if channel1 == None:
-        fetched_channels = channel1str
-    if channel2 == None:
-        if fetched_channels is not None:
-            fetched_channels += ", " + channel2str
-        else:
-            fetched_channels = channel2str
-    if channel1 == None or channel2 == None:
-        await ctx.send(f':negative_squared_cross_mark: I\'m unable to access the channel(s) listed: {fetched_channels}')
+    fetched_channels = []
+
+    if channel1 is None:
+        fetched_channels.append(channel1str)
+    if channel2 is None:
+        fetched_channels.append(channel2str)
+
+    if fetched_channels:
+        await ctx.send(f':negative_squared_cross_mark: I\'m unable to access the channel(s) listed: {", ".join(fetched_channels)}')
         return
+
     # Check if the pairing exists
-    fetched_channels = None
-    if(str(channel1.id) not in channel_pairs):
-        fetched_channels = channel1.mention
-    if(str(channel2.id) not in channel_pairs):
-        if fetched_channels is not None:
-            fetched_channels += ", " + channel2.mention
-        else:
-            fetched_channels = channel2.mention
-    if (str(channel1.id) not in channel_pairs) or (str(channel2.id) not in channel_pairs):
-        await ctx.send(f':negative_squared_cross_mark: The channel(s) listed aren\'t paired: {fetched_channels}')
+    missing_pair = []
+
+    if str(channel1.id) not in channel_pairs:
+        missing_pair.append(channel1.mention)
+    if str(channel2.id) not in channel_pairs:
+        missing_pair.append(channel2.mention)
+
+    if missing_pair:
+        await ctx.send(f':negative_squared_cross_mark: The channel(s) listed aren\'t paired: {", ".join(missing_pair)}')
         return
 
     # Delete the webhooks
-    await discord.Webhook.from_url(channel_pairs[str(channel1.id)][0], session=bot.http._HTTPClient__session).delete()
-    await discord.Webhook.from_url(channel_pairs[str(channel2.id)][0], session=bot.http._HTTPClient__session).delete()
+    await discord.Webhook.from_url(channel_pairs[str(channel1.id)]["webhook_url"], session=bot.http._HTTPClient__session).delete()
+    await discord.Webhook.from_url(channel_pairs[str(channel2.id)]["webhook_url"], session=bot.http._HTTPClient__session).delete()
 
     # Remove the pair from the dictionary
     del channel_pairs[str(channel1.id)]
     del channel_pairs[str(channel2.id)]
+
+    # Save the updated channel_pairs to the file
     save_data('channel_pairs.json.lzma', channel_pairs)
 
     await ctx.send(':white_check_mark: Webhook pair destroyed!')
 
 # Command to list channel pairs
-@bot.command()
+@bot.command(aliases=['listpairs', 'listchans', 'listchannels', 'viewpairs', 'viewchans', 'viewchannels'])
 @has_create_webhook_permission()
 async def list(ctx):
     processed_channels = set()  # Create a set to keep track of processed channel IDs
     pair_list = []
 
-    for ch1, (webhook_url, ch2) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for ch1, (webhook_url, ch2) in channel_pairs.items():
         # Check if the channel ID has already been processed
-        ch1 = int(ch1)
+        ch1 = int(channel_id)
+        ch2 = int(data["paired_id"])
         if ch1 in processed_channels and ch2 in processed_channels:
             continue
 
@@ -312,7 +357,7 @@ async def list(ctx):
     await ctx.send(embed=embed)
 
 # Command to set or display a nickname
-@bot.command() # Todo remove nickname command
+@bot.command(aliases=['nick', 'setnick', 'setnickname', 'changename']) # Todo add nickname removal option & ability to set nickname FOR users if you have set_nickname permission.
 async def nickname(ctx, *, args=None):
     global members
     if args:
@@ -323,28 +368,36 @@ async def nickname(ctx, *, args=None):
                 del members[str(ctx.author.id)]["nickname"] # Delete old nickname
             elif str(ctx.author.id) not in members:
                 members[str(ctx.author.id)] = {}
-            # User is setting their own nickname
-            members[str(ctx.author.id)]["nickname"] = args
-            save_data('members.json.lzma', members)
-            await ctx.send(embed=discord.Embed(description=f"Your nickname has been set to: {args}"))
+            # Check for duplicate nickname
+            for user_id, user_data in members.items():
+                if 'nickname' not in user_data:
+                    continue
+                if user_data['nickname'] == args:
+                    await ctx.send(embed=discord.Embed(description="That nickname is already in use by another user."))
+                    break
+            else: # Else is only activated if a break statement is never encountered during the for loop
+                # User is setting their own nickname
+                members[str(ctx.author.id)]["nickname"] = args
+                save_data('members.json.lzma', members)
+                await ctx.send(embed=discord.Embed(description=f"Your nickname has been set to: {args}"))
+                return
             return
         user_id = str(user.id)
-
-        if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
+        if str(user_id) in members and 'nickname' in members[str(user_id)]:
             # Displaying another user's nickname
-            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {members[user_id]['nickname']}"))
+            await ctx.send(embed=discord.Embed(description=f"{user.display_name}'s nickname is: {members[str(user_id)]['nickname']}"))
         else:
             # User not found in nicknames dictionary
             await ctx.send(embed=discord.Embed(description="No nickname is set for this user."))
     else:
         # No arguments provided, display the sender's own nickname
         user_id = str(ctx.author.id)
-        if str(ctx.author.id) in members and 'nickname' in members[str(ctx.author.id)]:
-            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {members[user_id]['nickname']}"))
+        if str(user_id) in members and 'nickname' in members[str(user_id)]:
+            await ctx.send(embed=discord.Embed(description=f"Your nickname is: {members[str(user_id)]['nickname']}"))
         else:
             await ctx.send(embed=discord.Embed(description="No nickname is set for you."))
 
-@bot.command()
+@bot.command(aliases=['getauth', 'getauthor', 'author'])
 @has_permissions(manage_messages=True) # Todo: use the message_channel_pairs command to get the channel
 async def get_author(ctx, message_id=None):
     if message_id is None:
@@ -390,7 +443,7 @@ async def get_author(ctx, message_id=None):
         await ctx.send("Paired message not found")
     
 # Help command
-@bot.command()
+@bot.command(aliases=['helpme', 'commands', 'cmds', 'info'])
 @has_create_webhook_permission()
 async def help(ctx):
     # Create an embed for the help message
@@ -468,17 +521,47 @@ async def help(ctx):
 
     await ctx.send(embed=embed)
 
+async def create_mirrored_message_embed(message):
+    global members
+    if str(message.author.id) in members and 'nickname' in members[str(message.author.id)]: # Nickname exists
+        username = members[str(message.author.id)]['nickname'] # Use nickname
+    else: # Nickanme doesn't exist
+        username = message.author.display_name # Use display_name
+    # Create an empty embed
+    embed = discord.Embed()
+
+    # Set the title of the embed to match the message content
+    embed.description = " "
+
+    # Set the color of the embed (hex color code)
+    embed.color = 0x00FFFF
+
+    # Set the footer of the embed to display the author's name
+    embed.set_footer(
+        text=f"{username}: {message.content}",
+        icon_url=message.author.display_avatar.url,
+    )
+
+    # Create a view to add the button component
+    view = discord.ui.View()
+    # Add a button component for "Jump to Original Message"
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.link, label="ᴶᵘᵐᵖ ᵗᵒ ᴿᵉᵖˡʸ", url=f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"))
+
+    return embed, view
+
+
 # Event to handle message copying
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-
+    if message.reference:
+        print(message.reference)
     # Find the paired channel for the current channel
-    paired_channel_id = None
-    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if message.channel.id == int(channel_id):
-            paired_channel_id = paired_id
+            paired_id = data['paired_id']
+            webhook_url = data['webhook_url']
             global message_pairs
             global message_channel_pairs
             global members
@@ -486,14 +569,36 @@ async def on_message(message):
                 username = members[str(message.author.id)]['nickname'] # Use nickname
             else: # Nickanme doesn't exist
                 username = message.author.display_name # Use display_name
-            webhook_url, _ = channel_pairs[str(paired_id)]
+            webhook_url = channel_pairs[str(paired_id)]["webhook_url"]
             async with aiohttp.ClientSession() as session:
+                if message.reference:
+                    embeds = []
+                    view = None
+                    if str(message.reference.message_id) in message_pairs: # Get the opposite message id since the reply will be in the paired channel
+                        target_message_id = message_pairs[str(message.reference.message_id)] #message.reference.message_id is real msg
+                    elif int(message.reference.message_id) in message_pairs.inverse:
+                        target_message_id = message_pairs.inverse[int(message.reference.message_id)][0] #message.reference.message_id is bot msg
+                    else:
+                        target_message_id = None
+                    if target_message_id:
+                        channel = bot.get_channel(message_channel_pairs[str(target_message_id)])
+                        reference_message = await channel.fetch_message(target_message_id)
+                        embed, view = await create_mirrored_message_embed(reference_message)
+                        embeds.append(embed)
+                        print(embed)
+                else:
+                    embeds = [] 
+                    view = None
                 files = []
                 for attachment in message.attachments:
                     file = await attachment.to_file(use_cached=True, spoiler=attachment.is_spoiler())
                     files.append(file)
                 webhook = discord.Webhook.from_url(webhook_url, session=session)
-                response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url, files=files, wait=True)
+                webhook = await bot.fetch_webhook(webhook.id) # Todo: Change channel pairs code to save webhook.id instead of webhook url, I *really* don't want to recode it though...
+                if view:
+                    response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url,files=files,embeds=embeds, view=view, wait=True)
+                else:
+                    response = await webhook.send(username=username,content=message.content,avatar_url=message.author.display_avatar.url,files=files,embeds=embeds, wait=True)
                 message_pairs[str(message.id)] = response.id
                 save_data('message_pairs.json.lzma', message_pairs)
                 message_channel_pairs[str(message.id)] = message.channel.id # Real message
@@ -523,10 +628,10 @@ async def on_raw_message_delete(payload):
     save_data('message_channel_pairs.json.lzma', message_channel_pairs)
     
     # Find the paired channel for the current channel
-    paired_channel_id = None
-    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
             # Get the target channel
+            paired_id = data['paired_id']
             target_channel = bot.get_channel(paired_id)
             if target_channel:
                 try:
@@ -550,7 +655,7 @@ def delete_pair(m):
     #print(message_id)
     return True
 
-@bot.command()
+@bot.command(aliases=['purgech', 'purgechan', 'delete', 'clear', 'cleanup'])
 @has_permissions(administrator=True)
 async def purge(ctx, amount: int):
     if str(ctx.channel.id) not in channel_pairs:
@@ -559,9 +664,9 @@ async def purge(ctx, amount: int):
     global message_pairs
     global message_channel_pairs
     first = True
-    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if str(ctx.channel.id) == str(channel_id):
-            paired_channel = bot.get_channel(paired_id)
+            paired_channel = bot.get_channel(data['paired_id'])
             
             if not paired_channel:
                 #await ctx.send("Paired channel not found.")
@@ -601,36 +706,36 @@ async def on_raw_message_edit(payload):
     else:
         return
     # Find the paired channel for the current channel
-    paired_channel_id = None
-    paired_webhook_url = [v[0] for v in channel_pairs.values() if v[1] == payload.channel_id]
-    paired_webhook_url = paired_webhook_url[0]
+    paired_webhook_url = channel_pairs[str(channel_pairs[str(payload.channel_id)]["paired_id"])]["webhook_url"]
 
     # Check if the channel ID is in the paired channels dictionary
-    for channel_id, (webhook_url, paired_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, paired_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
-            paired_channel_id = paired_id
-            if paired_id is not None:
+            if data['paired_id'] is not None:
                 # Get the target channel
-                target_channel = bot.get_channel(paired_channel_id)
+                target_channel = bot.get_channel(data['paired_id'])
             
                 if target_channel:
                     # Edit the mirrored message in the target channel
                     print(f"Message edited with ID: {message_id}")
                     try:
+                        # Find the paired message in the target channel by ID
+                        target_message = await target_channel.fetch_message(target_message_id)
                         # Get the webhook and edit the message
                         webhook = discord.Webhook.from_url(paired_webhook_url, client=bot)
                         await webhook.edit_message(
                             target_message_id,
                             content=payload.data['content'],
                             attachments=payload.data['attachments'],
-                            embeds=payload.data['embeds'],
+                            embeds=target_message.embeds,
                         )
                         print(f"Mirrored message edited successfully: {target_message_id}")
+                        await update_message_reaction_count(target_channel, bot.get_channel(payload.channel_id), target_message_id, message_id)
                     except discord.NotFound as e:
                         print(f"Mirrored message not found in target channel: {target_message_id}")
                     except Exception as e:
                         print(f"Error editing message: {e}")
-                    await update_message_reaction_count(target_channel, bot.get_channel(payload.channel_id), target_message_id, message_id)
+                    
                         
 # Event listener for added reactions
 @bot.event
@@ -656,9 +761,9 @@ async def on_raw_reaction_add(payload):
     print(f"Reaction added: {emoji} by user {payload.user_id} to message {reacted_message_id} in channel {payload.channel_id}")
 
     # Check if the target message is in a paired channel 
-    for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
-            target_channel = bot.get_channel(target_channel_id)
+            target_channel = bot.get_channel(data["paired_id"])
             if target_channel:
                 global message_reactions
                 reaction_channel = bot.get_channel(payload.channel_id)
@@ -726,14 +831,13 @@ async def on_raw_reaction_remove(payload):
                     users_reacted.append(user)
     
     # Check if the target message is in a paired channel
-    for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
+    for channel_id, data in channel_pairs.items(): #for channel_id, (webhook_url, target_channel_id) in channel_pairs.items():
         if payload.channel_id == int(channel_id):
             # Get the target channel
-            target_channel = bot.get_channel(target_channel_id)
+            target_channel = bot.get_channel(data["paired_id"])
 
             if target_channel:
                 global message_reactions
-                target_channel = bot.get_channel(target_channel_id)
                 
                 emoji = str(payload.emoji)
             
@@ -741,7 +845,10 @@ async def on_raw_reaction_remove(payload):
                     message_reactions[str(reacted_message_id)] = {}
                     message_reactions[str(target_message_id)] = {}
             
-                if emoji in message_reactions[str(reacted_message_id)]:
+                if message_reactions[str(reacted_message_id)][emoji] <= 0:
+                    message_reactions[str(reacted_message_id)][emoji] = 0
+                    print("Negative reaction value!! Incorrect negative reaction count avoided!")
+                elif emoji in message_reactions[str(reacted_message_id)]:
                     message_reactions[str(reacted_message_id)][emoji] -= 1
                 else:
                     message_reactions[str(reacted_message_id)][emoji] = 0
@@ -768,8 +875,8 @@ async def on_raw_reaction_remove(payload):
 async def update_message_reaction_count(target_channel, reaction_channel, bot_message_id, user_message_id):
     global message_reactions
     # Combine reaction counts for both messages
-    user_emoji_counts = message_reactions[str(user_message_id)]
-    bot_emoji_counts = message_reactions[str(bot_message_id)]
+    user_emoji_counts = message_reactions.get(str(user_message_id), {})
+    bot_emoji_counts = message_reactions.get(str(bot_message_id), {})
 
     # Create a combined emoji count dictionary
     combined_emoji_counts = {}
@@ -783,25 +890,26 @@ async def update_message_reaction_count(target_channel, reaction_channel, bot_me
     emoji_count_str = " ".join([f"{count}-{emoji}" for emoji, count in combined_emoji_counts.items() if count > 1])
 
     # Update the content of reacted_message with the combined emoji counts
-    try:
-        bot_message = await reaction_channel.fetch_message(bot_message_id)
-        user_message = await target_channel.fetch_message(user_message_id)
-        channel = reaction_channel
-    except discord.errors.NotFound:
-        bot_message = await target_channel.fetch_message(bot_message_id)
-        user_message = await reaction_channel.fetch_message(user_message_id)
-        channel = target_channel
-    if bot_message and user_message:
-        paired_webhook_url = channel_pairs[str(channel.id)][0]
-        webhook = discord.Webhook.from_url(paired_webhook_url, client=bot)
-        if emoji_count_str:
-            new_content = f"{user_message.content.split('(')[0].strip()} ({emoji_count_str})"
-        else:
-            new_content = user_message.content  # Use the original content if emoji_count_str is empty
-        await webhook.edit_message(
-            int(bot_message_id),
-            content=new_content,
-        )
+    if combined_emoji_counts:
+        try:
+            bot_message = await reaction_channel.fetch_message(bot_message_id)
+            user_message = await target_channel.fetch_message(user_message_id)
+            channel = reaction_channel
+        except discord.errors.NotFound:
+            bot_message = await target_channel.fetch_message(bot_message_id)
+            user_message = await reaction_channel.fetch_message(user_message_id)
+            channel = target_channel
+        if bot_message and user_message:
+            paired_webhook_url = channel_pairs[str(channel.id)]["webhook_url"]
+            webhook = discord.Webhook.from_url(paired_webhook_url, client=bot)
+            if emoji_count_str:
+                new_content = f"{user_message.content.split('(')[0].strip()} ({emoji_count_str})"
+            else:
+                new_content = user_message.content  # Use the original content if emoji_count_str is empty
+            await webhook.edit_message(
+                int(bot_message_id),
+                content=new_content,
+            )
 
 # Run the bot
 if __name__ == '__main__':
